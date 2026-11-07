@@ -60,4 +60,6 @@ a PKCS#8 PEM Ed25519 key; the key id is `SHA-256(name || 0x0A || 0x01 || public 
 signed. `checkpoint::verify_cosignatures` checks witness cosignature/v1 lines (type byte `0x04`,
 eight-byte big-endian timestamp, Ed25519 over `cosignature/v1`, `time <t>` and the checkpoint lines).
 
-Part of [deedar](https://github.com/leidarljos/deedar). MIT.
+Released with [rfc9162](https://github.com/leidarljos/rfc9162) at the same version; the publish
+workflow publishes `rfc9162` before this crate. [deedar](https://github.com/leidarljos/deedar) builds
+its deed log on both. MIT.
