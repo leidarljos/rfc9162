@@ -1,0 +1,41 @@
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  # Writes the release for a tag that already exists, with this workflow and
+  # the tag's own source. The tag is not moved.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, such as v0.7.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The tag names a release
+        run: |
+          set -eu
+          echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+      # Both crates are libraries, so the release carries notes and no
+      # archives. The packages themselves are on crates.io.
+      - name: Release notes from the changelog
+        run: |
+          awk -v v="${TAG#v}" '$0 ~ "^## "v {p=1; next} /^## /{if(p) exit} p' CHANGELOG.md > notes.md
+          test -s notes.md || echo "See CHANGELOG.md." > notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          body_path: notes.md

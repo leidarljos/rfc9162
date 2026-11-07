@@ -1,0 +1,48 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the compiler and lists these components,
+      # so rustup adds none on the first cargo call.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      # Both crates are packaged and their packages built, in dependency
+      # order. rfc9162-tiles requires rfc9162 at the workspace version;
+      # the dry run resolves that from the local package, so a version
+      # not yet on crates.io still packages.
+      - name: cargo publish --dry-run
+        run: cargo publish --locked --dry-run --workspace
+
+  # The suite on macOS as well, where the tile store's locks and renames
+  # run on another filesystem.
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - run: cargo test --locked --workspace
