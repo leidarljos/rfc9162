@@ -39,7 +39,8 @@ checkpoint                C2SP checkpoint, an Ed25519 signed note
 ```
 
 A write is a temporary file, fsync and rename. The order is bundles, hash tiles, sidecars, manifest,
-tree state. Partial tiles are removed once their full tile exists. A tree of 70000 entries is 273
+tree state. A tail tile keeps only its widest partial, the one the tree state names; the narrower
+ones go with each write, and the widest goes once the full tile exists. A tree of 70000 entries is 273
 full level-0 tiles, a partial of width 112, one full level-1 tile, a partial of width 17 and a
 partial level-2 tile of width 1.
 
