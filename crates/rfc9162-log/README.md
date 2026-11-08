@@ -44,3 +44,17 @@ let mut sidecar = rfc9162_log::Sidecar::open(&store)?;
 sidecar.put("modules/PETSc/3.25.0.lua", &lua, meta)?;
 let note = sidecar.snapshot(&signer, "example.org/site/stack-2026")?;
 ```
+
+From a shell, `rfc9162-sidecar` (`cargo install rfc9162-log`) runs the same
+over `DIR/.sidecar/pack`:
+
+```
+rfc9162-sidecar init     --dir /etc
+rfc9162-sidecar sync     --dir /etc --meta actor=root
+rfc9162-sidecar snapshot --dir /etc --key /root/keys/etc.pem --origin example.org/etc
+rfc9162-sidecar history  --dir /etc ssh/sshd_config
+rfc9162-sidecar tree     --dir /etc [SIZE]
+rfc9162-sidecar diff     --dir /etc FROM TO
+rfc9162-sidecar blob     --dir /etc HEX [--out FILE]
+rfc9162-sidecar include  --dir /site stacks/2026 --note head.txt --trusted "KEYLINE"
+```
