@@ -69,7 +69,7 @@ fn a_torn_tail_is_ignored_and_overwritten() {
         len
     };
     // A crash mid-record: the pack ends inside the second record's head.
-    let mut file = std::fs::OpenOptions::new().write(true).open(&pack).unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(&pack).unwrap();
     file.set_len(good_len + 10).unwrap();
     drop(file);
     let reader = PackStore::open_read(&pack).unwrap();
