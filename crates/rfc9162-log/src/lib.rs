@@ -1,11 +1,11 @@
 //! An authenticated, indexed, append-only log over [`rfc9162`] and
-//! [`rfc9162_tiles`]: the contract, written before the store.
+//! [`rfc9162_tiles`]: the contract, the store that keeps it, and a sidecar
+//! over a project tree.
 //!
 //! `rfc9162` is the tree; `rfc9162-tiles` stores it with key sidecars that
 //! the checkpoint does not sign, finds a key by filtered scan, and detects a
-//! torn tail without proving the recovery. This crate names what the next
-//! store adds, as types a consumer can write against while the store is
-//! argued over:
+//! torn tail without proving the recovery. This crate adds, as a contract
+//! ([`AuthenticatedLog`]) and a store ([`Store`]) behind it:
 //!
 //! - every index structure is itself logged, so the checkpoint that signs
 //!   the entries signs the index ([`RunManifest::manifest_index`]);
@@ -18,15 +18,19 @@
 //! - recovery replays the tail past the last signed checkpoint and proves the
 //!   result consistent with it ([`Recovery`]).
 //!
-//! Nothing here stores bytes yet. The signatures are the thing to disagree
-//! with; the store follows the agreed ones.
+//! [`Sidecar`] sits beside a project tree the way `.git` does: every change
+//! to a path is an entry whose bytes are a content-addressed blob in the
+//! same store, a snapshot is a signed checkpoint, and over a
+//! [`rfc9162_tiles::PackStore`] the whole history is one file.
 
 #![forbid(unsafe_code)]
 
+pub mod sidecar;
 pub mod store;
 
 use std::ops::RangeInclusive;
 
+pub use sidecar::{Change, Found, Op, Sidecar};
 pub use store::{Keys, Store};
 
 /// A sealed, sorted run of lookup keys over a contiguous range of entries,

@@ -288,8 +288,13 @@ dependencies = [
 name = "rfc9162-log"
 version = "0.7.0"
 dependencies = [
+ "ed25519-dalek",
  "rfc9162",
  "rfc9162-tiles",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
