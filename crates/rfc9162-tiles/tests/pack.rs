@@ -173,6 +173,11 @@ fn a_log_over_a_pack_costs_a_constant_number_of_inodes() {
         assert_eq!(writer.size(), 1000);
     }
     assert!(!store.exists(TREE_STATE_LOCK).unwrap());
+    // Three full bundles and the one partial of width 232; the narrower
+    // partials the tail passed through are gone, at level 0 as well.
+    assert_eq!(store.list("tile/entries").unwrap().len(), 4);
+    assert_eq!(store.list("tile/0").unwrap().len(), 4);
+    assert_eq!(store.list("tile/1").unwrap().len(), 1);
     let files: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

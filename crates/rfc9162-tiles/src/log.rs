@@ -239,12 +239,27 @@ impl<S: TileStore> Writer<S> {
         self.tree_state().write(&self.store)?;
 
         // Older partials of a tile that is full are covered by the full tile and
-        // the tree state, so nothing needs them.
+        // the tree state, so nothing needs them; the narrower partials of the
+        // tail's tiles are covered by the widest one, which the tree state
+        // names, so only that one stays.
         for (index, _) in &sealed {
             self.remove_partials(&entries_path(*index, TILE_WIDTH as u16))?;
         }
         for (tile, _) in &completed {
             self.remove_partials(&tile.path())?;
+        }
+        if !self.partial.is_empty() {
+            let full = entries_path(layout.full_bundles(), TILE_WIDTH as u16);
+            let keep = entries_path(layout.full_bundles(), layout.partial_bundle_width());
+            self.remove_partials_but(&full, &keep)?;
+        }
+        for (tile, _) in self.frontier.partial_tiles() {
+            let full = Tile {
+                level: tile.level,
+                index: tile.index,
+                width: TILE_WIDTH as u16,
+            };
+            self.remove_partials_but(&full.path(), &tile.path())?;
         }
         Ok(start..end)
     }
@@ -310,6 +325,15 @@ impl<S: TileStore> Writer<S> {
     fn remove_partials(&self, full_path: &str) -> Result<()> {
         for path in self.store.list(&format!("{full_path}.p"))? {
             self.store.delete(&path)?;
+        }
+        Ok(())
+    }
+
+    fn remove_partials_but(&self, full_path: &str, keep: &str) -> Result<()> {
+        for path in self.store.list(&format!("{full_path}.p"))? {
+            if path != keep {
+                self.store.delete(&path)?;
+            }
         }
         Ok(())
     }
