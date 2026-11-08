@@ -16,7 +16,11 @@ rfc9162-tiles.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+ed25519-dalek.workspace = true
+
+[[bin]]
+name = "rfc9162-sidecar"
+path = "src/bin/sidecar.rs"
 
 [dev-dependencies]
-ed25519-dalek.workspace = true
 tempfile.workspace = true
