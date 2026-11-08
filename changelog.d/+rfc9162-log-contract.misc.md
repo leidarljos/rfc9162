@@ -1,0 +1,1 @@
+`rfc9162-log`, unpublished: the contract of the authenticated, indexed log the next store implements (logged run manifests, lookups with proofs, sorted-run ranges, compaction that keeps proofs, proven recovery), as types with no store behind them yet.

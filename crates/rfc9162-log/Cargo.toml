@@ -1,0 +1,16 @@
+[package]
+name = "rfc9162-log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/leidarljos/rfc9162"
+readme = "README.md"
+description = "An authenticated, indexed, append-only log over rfc9162 and rfc9162-tiles: the contract, ahead of the store"
+keywords = ["merkle", "transparency", "log", "index", "sstable"]
+categories = ["cryptography", "database-implementations"]
+publish = false
+
+[dependencies]
+rfc9162.workspace = true
+rfc9162-tiles = { path = "../rfc9162-tiles", version = "0.6.1" }
