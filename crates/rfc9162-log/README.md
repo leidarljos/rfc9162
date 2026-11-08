@@ -31,8 +31,9 @@ appends one JSON entry (`{"sidecar":1,"op":"put","path":...,"blob":...,
 "size":...,"meta":{...}}`); `delete(path, meta)` appends the deletion.
 `history(path)` is a point lookup with proofs, `under(dir)` a range over the
 sorted runs, `tree_at(size)` the paths a snapshot holds, `diff(from, to)`
-the changes between two, and `snapshot(signer, origin)` seals the tail
-into a run and signs the log. A third party proves any change from the
+the changes between two, `sync_dir(root, skip, meta)` records a directory
+against the tree in one batch, and `snapshot(signer, origin)` seals the
+tail into a run and signs the log. A third party proves any change from the
 checkpoint alone. Over a `PackStore` the sidecar is one file and its lock.
 
 ```rust

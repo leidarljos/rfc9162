@@ -18,6 +18,7 @@
 //! the blob, not the entry.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use rfc9162_tiles::{Note, Signer, TileStore};
@@ -299,4 +300,136 @@ fn decode(bytes: &[u8]) -> Option<Change> {
         return None;
     }
     serde_json::from_slice(bytes).ok()
+}
+
+/// What [`Sidecar::sync_dir`] recorded.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Synced {
+    /// Paths the log did not hold.
+    pub added: Vec<String>,
+    /// Paths whose bytes differ from the log's latest put.
+    pub changed: Vec<String>,
+    /// Paths the log held that the directory lacks.
+    pub deleted: Vec<String>,
+    /// Paths whose bytes the log already holds.
+    pub unchanged: u64,
+    /// The log range the changes went to, empty when nothing changed.
+    pub entries: std::ops::Range<u64>,
+}
+
+impl<S: TileStore> Sidecar<S> {
+    /// Records the regular files under `root` against the tree the log
+    /// holds, the way etckeeper commits `/etc`: a file the log lacks or holds
+    /// with other bytes is a put, a path the log holds that the directory
+    /// lacks is a delete, and a file with the same bytes is left alone.
+    /// Every change carries `meta`, and all of them go in one batch after
+    /// their blobs. `skip` names entries at the top of `root` that are not
+    /// the project's, the sidecar's own directory among them. Symbolic
+    /// links are not followed and not recorded.
+    pub fn sync_dir(
+        &mut self,
+        root: &Path,
+        skip: &[&str],
+        meta: &BTreeMap<String, String>,
+    ) -> Result<Synced, Error> {
+        let held = self.tree_at(self.log.size())?;
+        let mut files = Vec::new();
+        walk(root, root, skip, &mut files)?;
+        let mut synced = Synced::default();
+        let mut lines = Vec::new();
+        let store_blobs = |this: &Self, hex: &str, bytes: &[u8]| -> Result<(), Error> {
+            let store = this.log.writer().store();
+            let at = blob_path(hex);
+            if !store.exists(&at)? {
+                store.put(&at, bytes)?;
+            }
+            Ok(())
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for (path, file) in files {
+            let bytes = std::fs::read(&file)?;
+            let digest: [u8; 32] = Sha256::digest(&bytes).into();
+            let hex = rfc9162::hex(&digest);
+            seen.insert(path.clone());
+            match held.get(&path) {
+                Some((_, change)) if change.blob.as_deref() == Some(hex.as_str()) => {
+                    synced.unchanged += 1;
+                    continue;
+                }
+                Some(_) => synced.changed.push(path.clone()),
+                None => synced.added.push(path.clone()),
+            }
+            store_blobs(self, &hex, &bytes)?;
+            let change = Change {
+                sidecar: 1,
+                op: Op::Put,
+                path,
+                blob: Some(hex),
+                size: Some(bytes.len() as u64),
+                meta: meta.clone(),
+            };
+            lines.push(
+                serde_json::to_vec(&change).map_err(|_| Error::Tree("change does not encode"))?,
+            );
+        }
+        for path in held.keys() {
+            if !seen.contains(path) {
+                synced.deleted.push(path.clone());
+                let change = Change {
+                    sidecar: 1,
+                    op: Op::Delete,
+                    path: path.clone(),
+                    blob: None,
+                    size: None,
+                    meta: meta.clone(),
+                };
+                lines.push(
+                    serde_json::to_vec(&change)
+                        .map_err(|_| Error::Tree("change does not encode"))?,
+                );
+            }
+        }
+        let size = self.log.size();
+        synced.entries = if lines.is_empty() {
+            size..size
+        } else {
+            self.log.append_batch(lines)?
+        };
+        Ok(synced)
+    }
+}
+
+/// Every regular file under `dir`, as (project path, filesystem path), in
+/// path order. Entries named in `skip` at the top level are left out.
+fn walk(
+    root: &Path,
+    dir: &Path,
+    skip: &[&str],
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) -> Result<(), Error> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if dir == root && skip.contains(&name.as_ref()) {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        let path = entry.path();
+        if kind.is_dir() {
+            walk(root, &path, skip, out)?;
+        } else if kind.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| Error::Tree("a file is not under the root"))?;
+            let text = relative
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.push((text, path));
+        }
+    }
+    Ok(())
 }

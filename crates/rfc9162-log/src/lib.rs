@@ -30,7 +30,7 @@ pub mod store;
 
 use std::ops::RangeInclusive;
 
-pub use sidecar::{Change, Found, Op, Sidecar};
+pub use sidecar::{Change, Found, Op, Sidecar, Synced};
 pub use store::{Keys, Store};
 
 /// A sealed, sorted run of lookup keys over a contiguous range of entries,
