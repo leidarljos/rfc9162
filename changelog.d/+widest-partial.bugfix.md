@@ -1,1 +1,0 @@
-`rfc9162-tiles`: a tail tile keeps only its widest partial. Every width a partial bundle or hash tile passed through stayed until the full tile existed, up to 255 files per level per tail tile; the tree state names the widest, which covers the narrower ones, so those are removed with each write.

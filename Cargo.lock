@@ -279,14 +279,14 @@ dependencies = [
 
 [[package]]
 name = "rfc9162"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "rfc9162-log"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "rfc9162",
  "rfc9162-tiles",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "rfc9162-tiles"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "ed25519-dalek",
  "miniz_oxide",
