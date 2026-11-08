@@ -57,8 +57,14 @@ fn main() {
 
     let fill = Instant::now();
     let mut store = Store::open(PosixStore::open(dir).expect("posix"), keys()).expect("open");
+    let mut batch = Vec::with_capacity(1000);
     for i in 0..n {
-        store.append(&entry(i)).expect("append");
+        batch.push(entry(i));
+        if batch.len() == 1000 || i + 1 == n {
+            store
+                .append_batch(std::mem::take(&mut batch))
+                .expect("append");
+        }
         if (i + 1) % seal_every == 0 {
             store.seal().expect("seal");
         }
@@ -85,6 +91,20 @@ fn main() {
         assert_eq!(hits.len(), 1, "{}", String::from_utf8_lossy(key));
     }
     let (s50, s99) = percentiles(store_us);
+    // the same lookups through one Index built once: the cost of a lookup
+    // without the per-call Index construction
+    let open = Instant::now();
+    let index = store.index().expect("index");
+    let open_us = open.elapsed().as_micros();
+    let mut index_us = Vec::with_capacity(probes.len());
+    for key in &probes {
+        let t = Instant::now();
+        let hits = index.find(key).expect("find");
+        index_us.push(t.elapsed().as_micros());
+        assert_eq!(hits.len(), 1);
+    }
+    let (i50, i99) = percentiles(index_us);
+    drop(index);
 
     let reader = Reader::open(store.writer().store(), tiles_keys()).expect("reader");
     let mut tiles_us = Vec::with_capacity(probes.len());
@@ -111,6 +131,7 @@ fn main() {
         compact.as_millis()
     );
     println!("store_find_us p50={s50} p99={s99}");
+    println!("index_open_us={open_us} index_find_us p50={i50} p99={i99}");
     println!("tiles_find_us p50={t50} p99={t99}");
     println!("run_bytes={} tile_bytes={}", bytes("runs"), bytes("tile"));
 }
