@@ -265,6 +265,34 @@ impl PackStore {
         }
         Ok(())
     }
+
+    fn append(&self, inner: &mut Inner, kind: u8, path: &str, body: &[u8]) -> io::Result<Slot> {
+        self.need_writer()?;
+        let (codec, stored) = if kind == KIND_PUT && body.len() >= COMPRESS_FROM {
+            let packed = miniz_oxide::deflate::compress_to_vec(body, DEFLATE_LEVEL);
+            if packed.len() * 10 < body.len() * 9 {
+                (CODEC_DEFLATE, packed)
+            } else {
+                (CODEC_RAW, body.to_vec())
+            }
+        } else {
+            (CODEC_RAW, body.to_vec())
+        };
+        let raw = u32::try_from(body.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "body over 4 GiB"))?;
+        let record = encode_stored(kind, codec, path, &stored, raw)?;
+        let at = inner.valid_len;
+        inner.file.seek(SeekFrom::Start(at))?;
+        inner.file.write_all(&record)?;
+        inner.file.sync_data()?;
+        inner.valid_len = at + record.len() as u64;
+        Ok(Slot {
+            offset: at + (HEAD_LEN + path.len()) as u64,
+            stored: stored.len() as u32,
+            raw,
+            codec,
+        })
+    }
 }
 
 /// Opens the pack file and reads its records.
@@ -314,34 +342,6 @@ fn load(path: &Path, writer: bool) -> io::Result<Inner> {
         scan(&mut inner)?;
     }
     Ok(inner)
-}
-
-fn append(&self, inner: &mut Inner, kind: u8, path: &str, body: &[u8]) -> io::Result<Slot> {
-    self.need_writer()?;
-    let (codec, stored) = if kind == KIND_PUT && body.len() >= COMPRESS_FROM {
-        let packed = miniz_oxide::deflate::compress_to_vec(body, DEFLATE_LEVEL);
-        if packed.len() * 10 < body.len() * 9 {
-            (CODEC_DEFLATE, packed)
-        } else {
-            (CODEC_RAW, body.to_vec())
-        }
-    } else {
-        (CODEC_RAW, body.to_vec())
-    };
-    let raw = u32::try_from(body.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "body over 4 GiB"))?;
-    let record = encode_stored(kind, codec, path, &stored, raw)?;
-    let at = inner.valid_len;
-    inner.file.seek(SeekFrom::Start(at))?;
-    inner.file.write_all(&record)?;
-    inner.file.sync_data()?;
-    inner.valid_len = at + record.len() as u64;
-    Ok(Slot {
-        offset: at + (HEAD_LEN + path.len()) as u64,
-        stored: stored.len() as u32,
-        raw,
-        codec,
-    })
 }
 
 impl Drop for PackStore {
