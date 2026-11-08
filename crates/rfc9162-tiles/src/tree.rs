@@ -192,13 +192,45 @@ impl Frontier {
     }
 }
 
+/// The hashes of `tile`. A partial tile a writer has since widened is read
+/// from the widest partial or the full tile, whose first `width` hashes it
+/// was, since a writer keeps only the widest partial of a tail tile.
 fn read_tile(store: &impl TileStore, tile: &Tile) -> Result<Vec<Hash>> {
     let path = tile.path();
-    let bytes = store.get(&path)?.ok_or_else(|| Error::Corrupt {
-        path: path.clone(),
-        reason: "missing".to_string(),
-    })?;
-    let hashes = decode_tile(&path, &bytes)?;
+    let hashes = match store.get(&path)? {
+        Some(bytes) => decode_tile(&path, &bytes)?,
+        None if !tile.is_full() => {
+            let full = Tile {
+                level: tile.level,
+                index: tile.index,
+                width: TILE_WIDTH as u16,
+            }
+            .path();
+            let mut covering = vec![full.clone()];
+            covering.extend(store.list(&format!("{full}.p"))?);
+            let mut found = None;
+            for candidate in covering {
+                if let Some(bytes) = store.get(&candidate)? {
+                    let mut hashes = decode_tile(&candidate, &bytes)?;
+                    if hashes.len() >= usize::from(tile.width) {
+                        hashes.truncate(usize::from(tile.width));
+                        found = Some(hashes);
+                        break;
+                    }
+                }
+            }
+            found.ok_or_else(|| Error::Corrupt {
+                path: path.clone(),
+                reason: "missing, and no wider tile covers it".to_string(),
+            })?
+        }
+        None => {
+            return Err(Error::Corrupt {
+                path,
+                reason: "missing".to_string(),
+            })
+        }
+    };
     if hashes.len() != usize::from(tile.width) {
         return Err(Error::Corrupt {
             path,

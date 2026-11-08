@@ -388,6 +388,39 @@ fn repair_index(store: &impl TileStore, keys: &KeyFn, frontier: &Frontier) -> Re
     Ok(manifest)
 }
 
+/// The entries of bundle `index` at `width`. A partial bundle a writer has
+/// since widened is read from the widest partial or the full bundle, whose
+/// first `width` entries it was, since a writer keeps only the widest
+/// partial of a tail bundle.
+fn read_bundle(store: &impl TileStore, index: u64, width: u16) -> Result<Vec<Vec<u8>>> {
+    let path = entries_path(index, width);
+    if let Some(bytes) = store.get(&path)? {
+        return decode_bundle(&path, &bytes);
+    }
+    if u64::from(width) < TILE_WIDTH {
+        let full = entries_path(index, TILE_WIDTH as u16);
+        let mut covering = vec![full.clone()];
+        covering.extend(store.list(&format!("{full}.p"))?);
+        for candidate in covering {
+            if let Some(bytes) = store.get(&candidate)? {
+                let mut entries = decode_bundle(&candidate, &bytes)?;
+                if entries.len() >= usize::from(width) {
+                    entries.truncate(usize::from(width));
+                    return Ok(entries);
+                }
+            }
+        }
+        return Err(Error::Corrupt {
+            path,
+            reason: "missing, and no wider bundle covers it".to_string(),
+        });
+    }
+    Err(Error::Corrupt {
+        path,
+        reason: "missing".to_string(),
+    })
+}
+
 fn read_partial_bundle(store: &impl TileStore, frontier: &Frontier) -> Result<Vec<Vec<u8>>> {
     let layout = Layout::new(frontier.size());
     let width = layout.partial_bundle_width();
@@ -395,11 +428,7 @@ fn read_partial_bundle(store: &impl TileStore, frontier: &Frontier) -> Result<Ve
         return Ok(Vec::new());
     }
     let path = entries_path(layout.full_bundles(), width);
-    let bytes = store.get(&path)?.ok_or_else(|| Error::Corrupt {
-        path: path.clone(),
-        reason: "missing".to_string(),
-    })?;
-    let entries = decode_bundle(&path, &bytes)?;
+    let entries = read_bundle(store, layout.full_bundles(), width)?;
     if entries.len() != usize::from(width) {
         return Err(Error::Corrupt {
             path,
@@ -671,11 +700,7 @@ impl<S: TileStore> Reader<S> {
             )));
         };
         let path = entries_path(index, width);
-        let bytes = self.store().get(&path)?.ok_or_else(|| Error::Corrupt {
-            path: path.clone(),
-            reason: "missing".to_string(),
-        })?;
-        let entries = decode_bundle(&path, &bytes)?;
+        let entries = read_bundle(self.store(), index, width)?;
         if entries.len() != usize::from(width) {
             return Err(Error::Corrupt {
                 path,

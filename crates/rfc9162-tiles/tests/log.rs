@@ -1,10 +1,11 @@
 //! A log written through the writer reads back entry for entry, survives a
 //! reopen, refuses a second writer, and quarantines a torn tail on open.
 
+use ed25519_dalek::SigningKey;
 use rfc9162::leaf_hash;
 use rfc9162_tiles::index::no_keys;
 use rfc9162_tiles::layout::{TREE_STATE, TREE_STATE_LOCK};
-use rfc9162_tiles::{Error, MemoryStore, PosixStore, Reader, TileStore, Writer};
+use rfc9162_tiles::{Error, MemoryStore, PosixStore, Reader, Signer, TileStore, Writer};
 
 fn entry(i: u64) -> Vec<u8> {
     format!("record {i}").into_bytes()
@@ -188,4 +189,39 @@ fn a_reader_refuses_an_entry_that_does_not_hash_to_its_leaf() {
         Err(Error::Corrupt { .. })
     ));
     assert!(!store.exists(TREE_STATE_LOCK).unwrap());
+}
+
+#[test]
+fn a_reader_at_an_older_checkpoint_reads_through_the_widest_partial() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PosixStore::open(dir.path()).unwrap();
+    let signer = Signer::new("example.org/log", SigningKey::from_bytes(&[5u8; 32])).unwrap();
+    let mut writer = Writer::open(store.clone(), no_keys()).unwrap();
+    writer.append_batch(entries(0..300)).unwrap();
+    writer.checkpoint(&signer, "example.org/log").unwrap();
+    // The tail grows past the checkpoint: its partial bundle and tiles are
+    // now wider, and the width-44 ones are gone.
+    writer.append_batch(entries(300..350)).unwrap();
+    assert!(!store.exists("tile/entries/001.p/44").unwrap());
+    assert!(!store.exists("tile/0/001.p/44").unwrap());
+    let reader = Reader::open_checkpoint(
+        store.clone(),
+        "example.org/log",
+        &[signer.verifier()],
+        no_keys(),
+    )
+    .unwrap();
+    assert_eq!(reader.size(), 300);
+    assert_eq!(reader.hashes().root().unwrap(), rfc9162::root(&leaves(300)));
+    assert_eq!(reader.bundle(1).unwrap().len(), 44);
+    assert_eq!(reader.get(299).unwrap(), Some(entry(299)));
+    assert_eq!(reader.get(300).unwrap(), None);
+    let proof = reader.inclusion(299).unwrap().unwrap();
+    assert!(rfc9162::verify_inclusion(
+        &leaf_hash(&entry(299)),
+        299,
+        300,
+        &proof,
+        &rfc9162::hex(&reader.root())
+    ));
 }
