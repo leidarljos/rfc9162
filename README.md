@@ -61,6 +61,33 @@ assert!(rfc9162::verify_inclusion(
 The crate README has the on-disk layout, the key functions behind `Reader::find`, and the
 checkpoint and cosignature checks.
 
+## A tree's history beside it
+
+`rfc9162-sidecar` keeps a directory's history the way etckeeper keeps
+`/etc`'s, as one signed log file under `DIR/.sidecar/pack` (`cargo install
+rfc9162-log`). The sync records what changed against the last snapshot,
+content-addressed, so an unchanged file costs nothing and a changed one
+costs its bytes once; the snapshot seals the tail into a run and signs the
+checkpoint. On a shared filesystem with an inode quota the whole history is
+one file and its lock, however many syncs it holds, and `compact` rewrites
+the pack without the records a later run replaced while every proof still
+checks.
+
+```
+rfc9162-sidecar init     --dir /etc
+# after each change, or from cron
+rfc9162-sidecar sync     --dir /etc --meta actor=root
+rfc9162-sidecar snapshot --dir /etc --key /root/keys/etc.pem --origin example.org/etc
+# what happened, with inclusion proofs
+rfc9162-sidecar history  --dir /etc ssh/sshd_config
+rfc9162-sidecar diff     --dir /etc 3 5
+```
+
+A site log can `include` a stack's checkpoint under a path, and a stack's a
+host's, so one signature at the top covers them all. The
+[`rfc9162-log` README](crates/rfc9162-log) has the entry format, the
+library calls and every command.
+
 ## Specifications
 
 - RFC 9162, Certificate Transparency Version 2.0: <https://www.rfc-editor.org/rfc/rfc9162>
