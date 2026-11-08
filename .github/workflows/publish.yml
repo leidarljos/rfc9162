@@ -28,13 +28,21 @@ jobs:
             exit 1
           fi
       - uses: dtolnay/rust-toolchain@stable
+      # crates.io hands a token to this workflow only once the repository is
+      # configured for Trusted Publishing there; until then the step is
+      # allowed to fail and the crates go out from a maintainer's machine.
       - uses: rust-lang/crates-io-auth-action@v1.0.5
         id: auth
+        continue-on-error: true
       # rfc9162-tiles requires rfc9162 at this version and rfc9162-log
       # requires both, so they go in that order. A version already on
       # crates.io is skipped, so a run that failed between two can be
       # started again.
+      - name: No Trusted Publishing configuration
+        if: steps.auth.outcome != 'success'
+        run: echo "crates.io gave no token for this repository; publish by hand with cargo publish --locked -p CRATE" >&2
       - name: Publish rfc9162, rfc9162-tiles, then rfc9162-log
+        if: steps.auth.outcome == 'success'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |

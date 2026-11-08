@@ -30,4 +30,5 @@ The three crates release together at the workspace version.
 3. Tag `vX.Y.Z` and push the tag.
 
 The publish workflow checks that the tag is the workspace version, then publishes `rfc9162`, `rfc9162-tiles` and `rfc9162-log` in that order.
+It takes its token from crates.io Trusted Publishing; while the repository is not configured there, the run says so and the three crates are published by hand, in that order, with `cargo publish --locked -p CRATE` from the tag's checkout.
 The release workflow writes a GitHub release whose notes are that version's changelog section.
