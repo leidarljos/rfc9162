@@ -21,3 +21,23 @@ HPC installs, general enough to carry an SBOM.
 
 `publish = false` until the store exists. The design discussion lives on the
 owner's tracker beside this repository.
+
+## A sidecar beside a project tree
+
+`Sidecar` keeps a project's history the way `.git` keeps a working tree's
+and etckeeper keeps `/etc`'s, as an authenticated log: `put(path, bytes,
+meta)` stores the bytes once per content hash at `blob/<sha256>` and
+appends one JSON entry (`{"sidecar":1,"op":"put","path":...,"blob":...,
+"size":...,"meta":{...}}`); `delete(path, meta)` appends the deletion.
+`history(path)` is a point lookup with proofs, `under(dir)` a range over the
+sorted runs, `tree_at(size)` the paths a snapshot holds, `diff(from, to)`
+the changes between two, and `snapshot(signer, origin)` seals the tail
+into a run and signs the log. A third party proves any change from the
+checkpoint alone. Over a `PackStore` the sidecar is one file and its lock.
+
+```rust
+let store = rfc9162_tiles::PackStore::open(project.join(".sidecar/pack"))?;
+let mut sidecar = rfc9162_log::Sidecar::open(&store)?;
+sidecar.put("modules/PETSc/3.25.0.lua", &lua, meta)?;
+let note = sidecar.snapshot(&signer, "example.org/site/stack-2026")?;
+```

@@ -13,3 +13,10 @@ categories = ["cryptography", "database-implementations"]
 [dependencies]
 rfc9162.workspace = true
 rfc9162-tiles.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+tempfile.workspace = true
