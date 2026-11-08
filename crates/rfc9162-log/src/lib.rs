@@ -23,7 +23,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod store;
+
 use std::ops::RangeInclusive;
+
+pub use store::{Keys, Store};
 
 /// A sealed, sorted run of lookup keys over a contiguous range of entries,
 /// recorded in the log as an entry of its own so the checkpoint signs it.
@@ -140,6 +144,9 @@ pub enum Error {
     Store(std::io::Error),
     /// The tree or a proof is malformed.
     Tree(&'static str),
+    /// The tile store refused in its own terms (a lock held, an entry too
+    /// long, a signature), with its message.
+    Tiles(String),
 }
 
 impl std::fmt::Display for Error {
@@ -148,6 +155,7 @@ impl std::fmt::Display for Error {
             Self::Tampered { what } => write!(f, "{what} does not match what the log committed to"),
             Self::Store(e) => write!(f, "store: {e}"),
             Self::Tree(what) => write!(f, "tree: {what}"),
+            Self::Tiles(what) => write!(f, "tiles: {what}"),
         }
     }
 }
