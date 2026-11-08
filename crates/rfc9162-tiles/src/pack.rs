@@ -109,7 +109,7 @@ impl PackStore {
         // A writer owns the tail: whatever a crash left past the last good
         // record is dropped before anything is appended after it.
         {
-            let mut inner = store.inner.lock().unwrap();
+            let inner = store.inner.lock().unwrap();
             let valid = inner.valid_len;
             if inner.file.metadata()?.len() != valid {
                 inner.file.set_len(valid)?;
@@ -175,7 +175,12 @@ impl PackStore {
         let mut offset = PACK_MAGIC.len() as u64;
         let mut live = BTreeMap::new();
         let mut live_bytes = PACK_MAGIC.len() as u64;
-        for (path, slot) in &inner.live {
+        let current: Vec<(String, Slot)> = inner
+            .live
+            .iter()
+            .map(|(path, slot)| (path.clone(), *slot))
+            .collect();
+        for (path, slot) in &current {
             let stored = read_stored(&mut inner.file, slot)?;
             let record = encode_stored(KIND_PUT, slot.codec, path, &stored, slot.raw)?;
             out.write_all(&record)?;
@@ -218,50 +223,7 @@ impl PackStore {
     }
 
     fn open_with(path: PathBuf, writer: bool) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(writer)
-            .create(writer)
-            .open(&path)?;
-        #[cfg(unix)]
-        let inode = {
-            use std::os::unix::fs::MetadataExt;
-            file.metadata()?.ino()
-        };
-        let mut inner = Inner {
-            file,
-            valid_len: 0,
-            live: BTreeMap::new(),
-            live_bytes: PACK_MAGIC.len() as u64,
-            #[cfg(unix)]
-            inode,
-        };
-        let len = inner.file.metadata()?.len();
-        if len == 0 {
-            if !writer {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{} is empty, not a pack", path.display()),
-                ));
-            }
-            inner.file.write_all(PACK_MAGIC)?;
-            inner.file.sync_all()?;
-            inner.valid_len = PACK_MAGIC.len() as u64;
-        } else {
-            let mut magic = vec![0u8; PACK_MAGIC.len()];
-            inner.file.seek(SeekFrom::Start(0))?;
-            match inner.file.read_exact(&mut magic) {
-                Ok(()) if magic == PACK_MAGIC => {}
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("{} is not a pack", path.display()),
-                    ))
-                }
-            }
-            inner.valid_len = PACK_MAGIC.len() as u64;
-            scan(&mut inner)?;
-        }
+        let inner = load(&path, writer)?;
         Ok(Self {
             path,
             writer,
@@ -295,8 +257,7 @@ impl PackStore {
         #[cfg(not(unix))]
         let replaced = meta.len() < inner.valid_len;
         if replaced {
-            let fresh = Self::open_with(self.path.clone(), false)?;
-            *inner = fresh.inner.into_inner().unwrap();
+            *inner = load(&self.path, false)?;
             return Ok(());
         }
         if meta.len() > inner.valid_len {
@@ -304,34 +265,83 @@ impl PackStore {
         }
         Ok(())
     }
+}
 
-    fn append(&self, inner: &mut Inner, kind: u8, path: &str, body: &[u8]) -> io::Result<Slot> {
-        self.need_writer()?;
-        let (codec, stored) = if kind == KIND_PUT && body.len() >= COMPRESS_FROM {
-            let packed = miniz_oxide::deflate::compress_to_vec(body, DEFLATE_LEVEL);
-            if packed.len() * 10 < body.len() * 9 {
-                (CODEC_DEFLATE, packed)
-            } else {
-                (CODEC_RAW, body.to_vec())
+/// Opens the pack file and reads its records.
+fn load(path: &Path, writer: bool) -> io::Result<Inner> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(writer)
+        .create(writer)
+        .open(&path)?;
+    #[cfg(unix)]
+    let inode = {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata()?.ino()
+    };
+    let mut inner = Inner {
+        file,
+        valid_len: 0,
+        live: BTreeMap::new(),
+        live_bytes: PACK_MAGIC.len() as u64,
+        #[cfg(unix)]
+        inode,
+    };
+    let len = inner.file.metadata()?.len();
+    if len == 0 {
+        if !writer {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} is empty, not a pack", path.display()),
+            ));
+        }
+        inner.file.write_all(PACK_MAGIC)?;
+        inner.file.sync_all()?;
+        inner.valid_len = PACK_MAGIC.len() as u64;
+    } else {
+        let mut magic = vec![0u8; PACK_MAGIC.len()];
+        inner.file.seek(SeekFrom::Start(0))?;
+        match inner.file.read_exact(&mut magic) {
+            Ok(()) if magic == PACK_MAGIC => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} is not a pack", path.display()),
+                ))
             }
+        }
+        inner.valid_len = PACK_MAGIC.len() as u64;
+        scan(&mut inner)?;
+    }
+    Ok(inner)
+}
+
+fn append(&self, inner: &mut Inner, kind: u8, path: &str, body: &[u8]) -> io::Result<Slot> {
+    self.need_writer()?;
+    let (codec, stored) = if kind == KIND_PUT && body.len() >= COMPRESS_FROM {
+        let packed = miniz_oxide::deflate::compress_to_vec(body, DEFLATE_LEVEL);
+        if packed.len() * 10 < body.len() * 9 {
+            (CODEC_DEFLATE, packed)
         } else {
             (CODEC_RAW, body.to_vec())
-        };
-        let raw = u32::try_from(body.len())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "body over 4 GiB"))?;
-        let record = encode_stored(kind, codec, path, &stored, raw)?;
-        let at = inner.valid_len;
-        inner.file.seek(SeekFrom::Start(at))?;
-        inner.file.write_all(&record)?;
-        inner.file.sync_data()?;
-        inner.valid_len = at + record.len() as u64;
-        Ok(Slot {
-            offset: at + (HEAD_LEN + path.len()) as u64,
-            stored: stored.len() as u32,
-            raw,
-            codec,
-        })
-    }
+        }
+    } else {
+        (CODEC_RAW, body.to_vec())
+    };
+    let raw = u32::try_from(body.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "body over 4 GiB"))?;
+    let record = encode_stored(kind, codec, path, &stored, raw)?;
+    let at = inner.valid_len;
+    inner.file.seek(SeekFrom::Start(at))?;
+    inner.file.write_all(&record)?;
+    inner.file.sync_data()?;
+    inner.valid_len = at + record.len() as u64;
+    Ok(Slot {
+        offset: at + (HEAD_LEN + path.len()) as u64,
+        stored: stored.len() as u32,
+        raw,
+        codec,
+    })
 }
 
 impl Drop for PackStore {
