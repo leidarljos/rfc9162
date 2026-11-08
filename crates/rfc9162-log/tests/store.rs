@@ -271,3 +271,63 @@ fn recovery_proves_the_tree_consistent_with_the_trusted_checkpoint() {
     assert!(matches!(none.recover(), Err(Error::Tree(_))));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_index_at_a_checkpoint_answers_without_the_writer_lock() {
+    let dir = scratch("index");
+    let (size, root) = {
+        let mut store =
+            Store::open(PosixStore::open(&dir).expect("posix"), fields()).expect("open");
+        for i in 0..6 {
+            store.append(&entry(i)).expect("append");
+        }
+        store.seal().expect("seal");
+        store.append(&entry(6)).expect("append");
+        (store.size(), store.root())
+    };
+    // the writer lock is held again while the index answers
+    let _writer = Store::open(PosixStore::open(&dir).expect("posix"), fields()).expect("open");
+    let index =
+        rfc9162_log::store::Index::at(PosixStore::open(&dir).expect("posix"), size, root, fields())
+            .expect("index");
+    assert_eq!(index.live_runs().len(), 1);
+    let hits = index.find(b"pkg=p0").expect("find");
+    assert_eq!(
+        hits.iter().map(|h| h.entry.index).collect::<Vec<_>>(),
+        vec![0, 3, 7]
+    );
+    assert!(hits[0].run.is_some());
+    assert!(hits[2].run.is_none(), "entry 7 is in the tail");
+    for hit in &hits {
+        assert_eq!(hit.entry.tree_size, size);
+        // entry 6 was appended after the manifest at index 6, so it sits at 7
+        let content = if hit.entry.index == 7 {
+            entry(6)
+        } else {
+            entry(hit.entry.index)
+        };
+        assert!(verify_inclusion(
+            &leaf_hash(&content),
+            hit.entry.index as usize,
+            size as usize,
+            &hit.entry.path,
+            &hex(&root)
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_batch_append_refuses_a_forged_manifest_and_writes_nothing() {
+    let mut store = filled(2);
+    let mut fake = rfc9162_log::store::MANIFEST_MAGIC.to_vec();
+    fake.extend_from_slice(b"junk");
+    assert!(matches!(
+        store.append_batch([entry(2), fake]),
+        Err(Error::Tree(_))
+    ));
+    assert_eq!(store.size(), 2);
+    let range = store.append_batch([entry(2), entry(3)]).expect("batch");
+    assert_eq!(range, 2..4);
+    assert_eq!(store.find(b"module=m3").expect("find")[0].entry.index, 3);
+}
