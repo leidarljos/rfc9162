@@ -5,6 +5,15 @@ The crates carry the one workspace version and are released together.
 
 <!-- towncrier release notes start -->
 
+## 0.8.0 (2026-11-08)
+
+### Features
+
+- `Sidecar::include_checkpoint` logs a child project's signed checkpoint under a path, verified against trusted keys and refused when it does not extend the child's last logged checkpoint, so a parent log's checkpoint signs its children's; `checkpoints(path)` reads them back.
+- `Sidecar::sync_dir` records the regular files under a directory against the tree the log holds, the way etckeeper commits `/etc`: a file the log lacks or holds with other bytes is a put, a path the directory lacks is a delete, an unchanged file is left alone, and every change goes in one batch after its blob.
+- `rfc9162-log::Sidecar`: a sidecar log beside a project tree. Every change to a path is a JSON entry keyed `path=` and `blob=`, its bytes a content-addressed blob stored once in the same store before the entry that names it; `history`, `under`, `tree_at`, `diff` read it back with proofs, and `snapshot` seals the tail and signs the log. Over a `PackStore` the whole history is one file and its lock.
+
+
 ## 0.7.0 (2026-11-08)
 
 ### Features

@@ -1,1 +1,0 @@
-`Sidecar::include_checkpoint` logs a child project's signed checkpoint under a path, verified against trusted keys and refused when it does not extend the child's last logged checkpoint, so a parent log's checkpoint signs its children's; `checkpoints(path)` reads them back.
