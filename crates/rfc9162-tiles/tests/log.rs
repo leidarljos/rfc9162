@@ -73,11 +73,12 @@ fn a_posix_log_reads_back_after_a_reopen() {
             "tile/0/002.p/88".to_string(),
         ]
     );
-    // The level-1 partial of size 301 stays beside the one of size 600:
-    // partials go only when their full tile exists.
+    // The level-1 partial of size 301 went when the one of size 600 was
+    // written: a tail tile keeps only its widest partial, the one the tree
+    // state names.
     assert_eq!(
         store.list("tile/1").unwrap(),
-        vec!["tile/1/000.p/1".to_string(), "tile/1/000.p/2".to_string()]
+        vec!["tile/1/000.p/2".to_string()]
     );
     assert_eq!(
         String::from_utf8(store.get(TREE_STATE).unwrap().unwrap()).unwrap(),
