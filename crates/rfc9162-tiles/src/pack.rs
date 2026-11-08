@@ -301,7 +301,7 @@ fn load(path: &Path, writer: bool) -> io::Result<Inner> {
         .read(true)
         .write(writer)
         .create(writer)
-        .open(&path)?;
+        .open(path)?;
     #[cfg(unix)]
     let inode = {
         use std::os::unix::fs::MetadataExt;

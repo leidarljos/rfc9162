@@ -65,12 +65,12 @@ fn a_torn_tail_is_ignored_and_overwritten() {
         let store = PackStore::open(&pack).unwrap();
         store.put("kept", b"kept bytes").unwrap();
         let len = store.len().unwrap();
-        store.put("torn", &vec![7u8; 4000]).unwrap();
+        store.put("torn", b"torn record bytes").unwrap();
         len
     };
-    // A crash mid-record: the pack ends inside the second record.
+    // A crash mid-record: the pack ends inside the second record's head.
     let mut file = std::fs::OpenOptions::new().write(true).open(&pack).unwrap();
-    file.set_len(good_len + 1000).unwrap();
+    file.set_len(good_len + 10).unwrap();
     drop(file);
     let reader = PackStore::open_read(&pack).unwrap();
     assert_eq!(
