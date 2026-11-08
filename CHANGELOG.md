@@ -5,6 +5,13 @@ The crates carry the one workspace version and are released together.
 
 <!-- towncrier release notes start -->
 
+## 0.9.0 (2026-11-08)
+
+### Features
+
+- `rfc9162-sidecar`, a binary in `rfc9162-log`: `init`, `sync`, `snapshot`, `history`, `tree`, `diff`, `blob` and `include` over a project directory from a shell, the sidecar at `DIR/.sidecar/pack`, the signing key a PKCS#8 PEM.
+
+
 ## 0.8.1 (2026-11-08)
 
 ### Fixes

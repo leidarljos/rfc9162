@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.85"
@@ -16,8 +16,8 @@ rust-version = "1.85"
 # The internal pin follows [workspace.package] version. cog writes this line.
 # Change that version, then run `cog -r @cogfiles.txt`.
 # [[[cog import versions; cog.out(versions.pins()) ]]]
-rfc9162 = { path = "crates/rfc9162", version = "0.8.1" }
-rfc9162-tiles = { path = "crates/rfc9162-tiles", version = "0.8.1" }
+rfc9162 = { path = "crates/rfc9162", version = "0.9.0" }
+rfc9162-tiles = { path = "crates/rfc9162-tiles", version = "0.9.0" }
 # [[[end]]]
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
