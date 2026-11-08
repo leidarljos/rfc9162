@@ -6,7 +6,8 @@ Two Rust crates for an append-only Merkle log hashed as RFC 9162
 | Crate | Carries |
 |---|---|
 | [`rfc9162`](crates/rfc9162) | the tree over 32-byte leaf hashes: root, inclusion and consistency proofs, the checks for both, and the `Head` a log signs. It stores nothing and serialises nothing. |
-| [`rfc9162-tiles`](crates/rfc9162-tiles) | tiled, indexed storage for such a log in the C2SP tlog-tiles layout: hash tiles, entry bundles, per-bundle key sidecars with a Bloom filter, a manifest for `find`, and C2SP checkpoints as Ed25519 signed notes. |
+| [`rfc9162-tiles`](crates/rfc9162-tiles) | tiled, indexed storage for such a log in the C2SP tlog-tiles layout: hash tiles, entry bundles, per-bundle key sidecars with a Bloom filter, a manifest for `find`, and C2SP checkpoints as Ed25519 signed notes; `PackStore` keeps a whole log in one file. |
+| [`rfc9162-log`](crates/rfc9162-log) | an authenticated, indexed log over both: sorted runs whose manifests are logged so the checkpoint signs the index, lookups and ranges with proofs, compaction that keeps proofs, and `Sidecar`, a project's history beside its tree with content-addressed blobs, directory sync, snapshots and nesting. |
 
 The root over the tiles is `rfc9162::root` over the same leaves at every size, and a proof
 assembled from tiles is the bytes the flat crate gives over the leaf slice. Any tlog-tiles client
@@ -17,6 +18,7 @@ reads the tree; the index sidecars are this repository's addition and tlog clien
 ```
 cargo add rfc9162
 cargo add rfc9162-tiles
+cargo add rfc9162-log
 ```
 
 The three crates carry one version and release together. `rfc9162-tiles` requires the `rfc9162`
