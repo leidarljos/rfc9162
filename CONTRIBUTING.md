@@ -23,11 +23,11 @@ CI runs `cog --check @cogfiles.txt` and fails a pin that has drifted.
 
 ## Releases
 
-Both crates release together at the workspace version.
+The three crates release together at the workspace version.
 
 1. Set the version in `Cargo.toml` and run `cog -r @cogfiles.txt`.
 2. `towncrier build --version X.Y.Z`, then commit the manifest, the lockfile and the changelog.
 3. Tag `vX.Y.Z` and push the tag.
 
-The publish workflow checks that the tag is the workspace version, then publishes `rfc9162` and `rfc9162-tiles` in that order.
+The publish workflow checks that the tag is the workspace version, then publishes `rfc9162`, `rfc9162-tiles` and `rfc9162-log` in that order.
 The release workflow writes a GitHub release whose notes are that version's changelog section.
