@@ -19,8 +19,8 @@ cargo add rfc9162
 cargo add rfc9162-tiles
 ```
 
-Both crates carry one version and release together. `rfc9162-tiles` requires the `rfc9162` of
-the same release.
+The three crates carry one version and release together. `rfc9162-tiles` requires the `rfc9162`
+of the same release, and `rfc9162-log` requires both.
 
 ## The tree
 

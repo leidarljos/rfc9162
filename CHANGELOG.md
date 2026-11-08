@@ -1,7 +1,7 @@
 # Changelog
 
 Versions follow semver at 0.x: a minor bump is a feature, a patch is a fix.
-Both crates carry the one workspace version and are released together.
+The crates carry the one workspace version and are released together.
 
 <!-- towncrier release notes start -->
 

@@ -17,6 +17,7 @@ rust-version = "1.85"
 # Change that version, then run `cog -r @cogfiles.txt`.
 # [[[cog import versions; cog.out(versions.pins()) ]]]
 rfc9162 = { path = "crates/rfc9162", version = "0.6.1" }
+rfc9162-tiles = { path = "crates/rfc9162-tiles", version = "0.6.1" }
 # [[[end]]]
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }

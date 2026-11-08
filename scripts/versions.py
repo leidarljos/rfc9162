@@ -28,11 +28,15 @@ def pins() -> str:
 
     A published crate that depends on another by path also has to require
     the version that crate publishes, or the published package does not
-    resolve. ``rfc9162-tiles`` depends on ``rfc9162`` this way; ``rfc9162``
-    is required by nothing in the workspace, so it has no pin of its own.
+    resolve. ``rfc9162-tiles`` depends on ``rfc9162`` this way and
+    ``rfc9162-log`` on both; ``rfc9162-log`` is required by nothing in the
+    workspace, so it has no pin of its own.
     """
     current = version()
-    return f'rfc9162 = {{ path = "crates/rfc9162", version = "{current}" }}\n'
+    return (
+        f'rfc9162 = {{ path = "crates/rfc9162", version = "{current}" }}\n'
+        f'rfc9162-tiles = {{ path = "crates/rfc9162-tiles", version = "{current}" }}\n'
+    )
 
 
 def main() -> None:
