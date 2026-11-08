@@ -331,3 +331,79 @@ fn a_batch_append_refuses_a_forged_manifest_and_writes_nothing() {
     assert_eq!(range, 2..4);
     assert_eq!(store.find(b"module=m3").expect("find")[0].entry.index, 3);
 }
+
+#[test]
+fn a_split_log_keeps_the_data_tree_as_the_entries_alone() {
+    let data = MemoryStore::new();
+    let index = MemoryStore::new();
+    let mut store = Store::open_split(data.clone(), index.clone(), fields()).expect("open");
+    for i in 0..6 {
+        store.append(&entry(i)).expect("append");
+    }
+    let run = store.seal().expect("seal");
+    assert_eq!(store.size(), 6, "no manifest in the data tree");
+    assert_eq!(
+        run.manifest_index,
+        Some(0),
+        "the first entry of the index log"
+    );
+    let index_writer = store.index_writer().expect("split store has an index log");
+    assert_eq!(index_writer.size(), 1);
+    let index_root = index_writer.root();
+    store.append(&entry(6)).expect("append");
+
+    let hits = store.find(b"pkg=p0").expect("find");
+    assert_eq!(
+        hits.iter().map(|h| h.entry.index).collect::<Vec<_>>(),
+        vec![0, 3, 6]
+    );
+    // the entry proofs are against the data tree, the run proof against the index log
+    for hit in &hits {
+        assert_eq!(hit.entry.tree_size, 7);
+        assert!(verify_inclusion(
+            &leaf_hash(&entry(hit.entry.index)),
+            hit.entry.index as usize,
+            7,
+            &hit.entry.path,
+            &hex(&store.root())
+        ));
+    }
+    let run_proof = hits[0].run.as_ref().expect("located through a run");
+    assert_eq!(run_proof.tree_size, 1);
+    let manifest = Reader::open(&index, rfc9162_tiles::index::no_keys())
+        .expect("index reader")
+        .get(0)
+        .expect("get")
+        .expect("manifest entry");
+    assert!(verify_inclusion(
+        &leaf_hash(&manifest),
+        0,
+        1,
+        &run_proof.path,
+        &hex(&index_root)
+    ));
+    assert!(hits[2].run.is_none(), "entry 6 is in the tail");
+    let logged = rfc9162_log::store::Logged::decode(&manifest, 0, false).expect("decode");
+    assert_eq!(
+        logged.data_size, 6,
+        "the manifest binds the data tree it indexed"
+    );
+
+    // a verifier opens both trees at their sizes without the writer locks
+    drop(store);
+    let reader = rfc9162_log::store::Index::at_split(
+        data.clone(),
+        7,
+        Reader::open(&data, rfc9162_tiles::index::no_keys())
+            .expect("data")
+            .root(),
+        index.clone(),
+        1,
+        index_root,
+        fields(),
+        Default::default(),
+    )
+    .expect("index");
+    assert_eq!(reader.live_runs().len(), 1);
+    assert_eq!(reader.find(b"module=m4").expect("find")[0].entry.index, 4);
+}

@@ -1,25 +1,37 @@
 //! The store behind [`AuthenticatedLog`]: sorted runs over [`rfc9162_tiles`],
-//! each run's manifest appended to the log itself so the checkpoint that
-//! signs the entries signs the index.
+//! each run's manifest appended to a log so a signed checkpoint covers the
+//! index as well as the entries.
 //!
-//! Layout inside the tile store, beside the tiles:
+//! Two layouts, one code path:
+//!
+//! - **Shared**: the manifests are entries of the data log itself. One tree,
+//!   one checkpoint signs entries and index. [`Store::open`], [`Index::at`].
+//! - **Split**: the manifests are entries of a second tile log, the index
+//!   log, each carrying the data tree's size and root it indexes. The data
+//!   log holds exactly the caller's entries, which a consumer that already
+//!   signs its data leaves needs; the index log has its own checkpoint under
+//!   the same key. [`Store::open_split`], [`Index::at_split`].
+//!
+//! Inside the store that holds the manifests (the data store when shared,
+//! the index store when split), beside the tiles:
 //!
 //! - `runs/<lo>-<hi>`: one sealed run, the sorted `(key, index)` pairs of
-//!   entries `lo..=hi` and a Bloom filter over the keys, in the format
+//!   data entries `lo..=hi` and a Bloom filter over the keys, in the format
 //!   `RUN_MAGIC` describes. Its SHA-256 is the `run_hash` the logged manifest
 //!   carries, so a reader checks the file before trusting a seek.
 //! - `runs/live`: the manifest indices of the runs a lookup goes through, one
 //!   per line, oldest first. A cache: when it is missing or stale the live set
 //!   is rebuilt from the manifest entries in the log.
 //!
-//! A manifest entry starts with `MANIFEST_MAGIC`, carries no lookup keys and
-//! lies in the entry range of the run sealed after it. Compaction logs a
-//! manifest that names the manifest indices it replaces; the replaced runs
-//! stay in the store and in the tree, and leave the live set.
+//! A manifest entry starts with `MANIFEST_MAGIC`, carries no lookup keys and,
+//! when shared, lies in the entry range of the run sealed after it.
+//! Compaction logs a manifest that names the manifest indices it replaces;
+//! the replaced runs stay in the store and in the tree, and leave the live
+//! set.
 //!
-//! [`Store`] is the one writer and holds the writer lock. [`Index`] answers
-//! lookups at a tree size and root a caller trusts, without the lock, which is
-//! how a verifier that holds a signed checkpoint reads the log.
+//! [`Store`] is the one writer and holds the writer locks. [`Index`] answers
+//! lookups at tree sizes and roots a caller trusts, without the locks, which
+//! is how a verifier that holds signed checkpoints reads the log.
 
 use std::collections::{BTreeSet, HashMap};
 use std::ops::RangeInclusive;
@@ -33,7 +45,7 @@ use rfc9162_tiles::store::TileStore;
 use crate::{AuthenticatedLog, Compaction, Error, Inclusion, Located, Recovery, RunManifest};
 
 /// First bytes of a logged run manifest.
-pub const MANIFEST_MAGIC: &[u8] = b"rfc9162-log/manifest/v1\n";
+pub const MANIFEST_MAGIC: &[u8] = b"rfc9162-log/manifest/v2\n";
 /// First bytes of a run file.
 pub const RUN_MAGIC: &[u8] = b"rfc9162-log/run/v1\n";
 const LIVE: &str = "runs/live";
@@ -116,12 +128,19 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// A logged manifest, as the entry carries it: the run it describes and the
-/// manifest indices of the runs it replaced (none for a seal).
+/// A logged manifest, as the entry carries it: the run it describes, the
+/// data tree (size and root) at the moment it was sealed, and the manifest
+/// indices of the runs it replaced (none for a seal).
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Logged {
-    run: RunManifest,
-    replaced: Vec<u64>,
+pub struct Logged {
+    /// The run.
+    pub run: RunManifest,
+    /// Entries of the data tree when the run was sealed.
+    pub data_size: u64,
+    /// Root of the data tree when the run was sealed.
+    pub data_root: [u8; 32],
+    /// Manifest indices of the runs this one replaced.
+    pub replaced: Vec<u64>,
 }
 
 impl Logged {
@@ -132,6 +151,8 @@ impl Logged {
         put_bytes(&mut out, &self.run.key_lo)?;
         put_bytes(&mut out, &self.run.key_hi)?;
         out.extend_from_slice(&self.run.run_hash);
+        put_u64(&mut out, self.data_size);
+        out.extend_from_slice(&self.data_root);
         let n = u32::try_from(self.replaced.len())
             .map_err(|_| Error::Tree("too many replaced runs"))?;
         out.extend_from_slice(&n.to_be_bytes());
@@ -141,7 +162,10 @@ impl Logged {
         Ok(out)
     }
 
-    fn decode(bytes: &[u8], manifest_index: u64) -> Result<Self, Error> {
+    /// Decodes the manifest entry at `manifest_index`. `shared` says the
+    /// manifest sits in the data tree, where its index has to lie past the
+    /// run it describes.
+    pub fn decode(bytes: &[u8], manifest_index: u64, shared: bool) -> Result<Self, Error> {
         let what = "manifest entry";
         let body = bytes
             .strip_prefix(MANIFEST_MAGIC)
@@ -156,13 +180,15 @@ impl Logged {
         let key_lo = c.bytes()?.to_vec();
         let key_hi = c.bytes()?.to_vec();
         let run_hash: [u8; 32] = c.take(32)?.try_into().expect("32 bytes");
+        let data_size = c.u64()?;
+        let data_root: [u8; 32] = c.take(32)?.try_into().expect("32 bytes");
         let n = c.u32()?;
         let mut replaced = Vec::with_capacity(n as usize);
         for _ in 0..n {
             replaced.push(c.u64()?);
         }
         c.done()?;
-        if lo > hi || hi >= manifest_index {
+        if lo > hi || hi >= data_size || (shared && hi >= manifest_index) {
             return Err(Error::Tampered { what });
         }
         Ok(Self {
@@ -173,6 +199,8 @@ impl Logged {
                 run_hash,
                 manifest_index: Some(manifest_index),
             },
+            data_size,
+            data_root,
             replaced,
         })
     }
@@ -276,15 +304,17 @@ fn contiguous(runs: &[RunManifest]) -> bool {
     true
 }
 
-/// The live runs below `size`: the cache at `runs/live` when every line of it
-/// names a manifest entry below `size` and the runs are contiguous, else a
-/// rebuild from the manifest entries in `0..size` with the replacements
-/// applied. The flag says whether it was rebuilt.
+/// The live runs whose manifests sit below `size` in the manifest log: the
+/// cache at `runs/live` when every line names a manifest entry below `size`
+/// and the runs are contiguous, else a rebuild from the manifest entries in
+/// `0..size` with the replacements applied. The flag says whether it was
+/// rebuilt.
 fn load_live<S: TileStore>(
-    reader: &Reader<S>,
+    manifests: &Reader<S>,
     size: u64,
+    shared: bool,
 ) -> Result<(Vec<RunManifest>, bool), Error> {
-    if let Some(bytes) = reader.store().get(LIVE)? {
+    if let Some(bytes) = manifests.store().get(LIVE)? {
         let text = String::from_utf8_lossy(&bytes);
         let mut runs = Vec::new();
         let mut ok = true;
@@ -297,9 +327,9 @@ fn load_live<S: TileStore>(
                 ok = false;
                 break;
             }
-            match reader.get(index)? {
+            match manifests.get(index)? {
                 Some(entry) if entry.starts_with(MANIFEST_MAGIC) => {
-                    runs.push(Logged::decode(&entry, index)?.run);
+                    runs.push(Logged::decode(&entry, index, shared)?.run);
                 }
                 _ => {
                     ok = false;
@@ -313,13 +343,13 @@ fn load_live<S: TileStore>(
     }
     let mut runs: Vec<RunManifest> = Vec::new();
     for index in 0..size {
-        let Some(entry) = reader.get(index)? else {
+        let Some(entry) = manifests.get(index)? else {
             return Err(Error::Tree("entry missing below the tree size"));
         };
         if !entry.starts_with(MANIFEST_MAGIC) {
             continue;
         }
-        let logged = Logged::decode(&entry, index)?;
+        let logged = Logged::decode(&entry, index, shared)?;
         runs.retain(|r| {
             !logged
                 .replaced
@@ -347,19 +377,22 @@ fn save_live(store: &impl TileStore, runs: &[RunManifest]) -> Result<(), Error> 
     Ok(())
 }
 
-/// Lookups at a tree size and root the caller trusts, without the writer
-/// lock. Every answer carries inclusion paths against that size, so a caller
-/// holding a signed checkpoint for it proves each hit with the checkpoint's
-/// root and nothing from the store.
+/// Lookups at tree sizes and roots the caller trusts, without the writer
+/// locks. Every answer carries inclusion paths against those sizes: the
+/// entry's against the data tree, the run manifest's against the tree that
+/// holds the manifests (the same tree when shared), so a caller holding the
+/// signed checkpoints proves each hit with their roots and nothing from the
+/// store.
 pub struct Index<S: TileStore> {
-    reader: Reader<S>,
+    data: Reader<S>,
+    manifests: Option<Reader<S>>,
     keys: Keys,
     live: Vec<RunManifest>,
     cache: RunCache,
 }
 
 impl<S: TileStore> Index<S> {
-    /// Opens the lookups at `size` with `root`, with its own run cache.
+    /// Opens the lookups on a shared log at `size` with `root`.
     pub fn at(store: S, size: u64, root: [u8; 32], keys: Keys) -> Result<Self, Error> {
         Self::with_cache(store, size, root, keys, Arc::default())
     }
@@ -372,10 +405,41 @@ impl<S: TileStore> Index<S> {
         keys: Keys,
         cache: RunCache,
     ) -> Result<Self, Error> {
-        let reader = Reader::at(store, size, root, tiles_keys(&keys))?;
-        let (live, _) = load_live(&reader, size)?;
+        let data = Reader::at(store, size, root, tiles_keys(&keys))?;
+        let (live, _) = load_live(&data, size, true)?;
         Ok(Self {
-            reader,
+            data,
+            manifests: None,
+            keys,
+            live,
+            cache,
+        })
+    }
+
+    /// Opens the lookups on a split log: the data tree at `data_size` with
+    /// `data_root` and the index log at `index_size` with `index_root`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn at_split(
+        data_store: S,
+        data_size: u64,
+        data_root: [u8; 32],
+        index_store: S,
+        index_size: u64,
+        index_root: [u8; 32],
+        keys: Keys,
+        cache: RunCache,
+    ) -> Result<Self, Error> {
+        let data = Reader::at(data_store, data_size, data_root, tiles_keys(&keys))?;
+        let manifests = Reader::at(index_store, index_size, index_root, tiles_keys(&keys))?;
+        let (live, _) = load_live(&manifests, index_size, false)?;
+        // A run that indexes entries past this data tree is not usable here.
+        let live = live
+            .into_iter()
+            .take_while(|run| *run.entries.end() < data_size)
+            .collect();
+        Ok(Self {
+            data,
+            manifests: Some(manifests),
             keys,
             live,
             cache,
@@ -388,15 +452,21 @@ impl<S: TileStore> Index<S> {
         &self.live
     }
 
-    /// The tree size the lookups answer at.
+    /// The data tree size the lookups answer at.
     #[must_use]
     pub fn size(&self) -> u64 {
-        self.reader.size()
+        self.data.size()
     }
 
-    /// The tiles reader underneath, for entries and proofs.
+    /// The tiles reader of the data log, for entries and proofs.
     pub fn reader(&self) -> &Reader<S> {
-        &self.reader
+        &self.data
+    }
+
+    /// The tiles reader that holds the manifests: the index log's when split,
+    /// the data log's when shared.
+    pub fn manifest_reader(&self) -> &Reader<S> {
+        self.manifests.as_ref().unwrap_or(&self.data)
     }
 
     fn last_sealed(&self) -> Option<u64> {
@@ -417,7 +487,7 @@ impl<S: TileStore> Index<S> {
         }
         let path = run_path(&run.entries);
         let bytes = self
-            .reader
+            .manifest_reader()
             .store()
             .get(&path)?
             .ok_or(Error::Tampered { what: "run file" })?;
@@ -429,14 +499,13 @@ impl<S: TileStore> Index<S> {
         Ok(decoded)
     }
 
-    fn inclusion(&self, index: u64) -> Result<Inclusion, Error> {
-        let path = self
-            .reader
+    fn inclusion_in(reader: &Reader<S>, index: u64) -> Result<Inclusion, Error> {
+        let path = reader
             .inclusion(index)?
             .ok_or(Error::Tree("no inclusion path below the tree size"))?;
         Ok(Inclusion {
             index,
-            tree_size: self.reader.size(),
+            tree_size: reader.size(),
             path,
         })
     }
@@ -447,22 +516,22 @@ impl<S: TileStore> Index<S> {
                 let manifest_index = run
                     .manifest_index
                     .ok_or(Error::Tree("live run without a manifest index"))?;
-                Some(self.inclusion(manifest_index)?)
+                Some(Self::inclusion_in(self.manifest_reader(), manifest_index)?)
             }
             None => None,
         };
         Ok(Located {
-            entry: self.inclusion(index)?,
+            entry: Self::inclusion_in(&self.data, index)?,
             run,
         })
     }
 
-    /// The `(key, index)` pairs of the entries after the last sealed one.
+    /// The `(key, index)` pairs of the data entries after the last sealed one.
     fn tail_pairs(&self) -> Result<Vec<(Vec<u8>, u64)>, Error> {
         let from = self.last_sealed().map_or(0, |last| last + 1);
         let mut pairs = Vec::new();
-        for index in from..self.reader.size() {
-            let Some(entry) = self.reader.get(index)? else {
+        for index in from..self.data.size() {
+            let Some(entry) = self.data.get(index)? else {
                 return Err(Error::Tree("entry missing below the tree size"));
             };
             if entry.starts_with(MANIFEST_MAGIC) {
@@ -530,10 +599,11 @@ impl<S: TileStore> Index<S> {
     }
 }
 
-/// The store: one writer over a tile store, the live runs, and the size a
-/// trusted checkpoint covers.
+/// The store: the data writer, the manifest writer when split, the live
+/// runs, and the size a trusted checkpoint covers.
 pub struct Store<S: TileStore> {
-    writer: Writer<S>,
+    data: Writer<S>,
+    manifests: Option<Writer<S>>,
     keys: Keys,
     live: Vec<RunManifest>,
     cache: RunCache,
@@ -541,12 +611,30 @@ pub struct Store<S: TileStore> {
 }
 
 impl<S: TileStore> Store<S> {
-    /// Opens the log on `store` with the writer lock, rebuilding the live set
-    /// from the logged manifests when the cache does not match them.
+    /// Opens a shared log on `store` with the writer lock, rebuilding the
+    /// live set from the logged manifests when the cache does not match them.
     pub fn open(store: S, keys: Keys) -> Result<Self, Error> {
-        let writer = Writer::open(store, tiles_keys(&keys))?;
+        let data = Writer::open(store, tiles_keys(&keys))?;
         let mut this = Self {
-            writer,
+            data,
+            manifests: None,
+            keys,
+            live: Vec::new(),
+            cache: Arc::default(),
+            trusted: None,
+        };
+        this.reload_live()?;
+        Ok(this)
+    }
+
+    /// Opens a split log: entries go to `data`, run files and manifests to
+    /// `index`. Both writer locks are held.
+    pub fn open_split(data: S, index: S, keys: Keys) -> Result<Self, Error> {
+        let data = Writer::open(data, tiles_keys(&keys))?;
+        let manifests = Writer::open(index, tiles_keys(&keys))?;
+        let mut this = Self {
+            data,
+            manifests: Some(manifests),
             keys,
             live: Vec::new(),
             cache: Arc::default(),
@@ -557,9 +645,9 @@ impl<S: TileStore> Store<S> {
     }
 
     /// Like [`Store::open`], trusting `root` as the root at `size`: what
-    /// [`AuthenticatedLog::recover`] proves the current tree consistent with.
-    /// The pair comes from a signed checkpoint kept where the store's writer
-    /// cannot reach it.
+    /// [`AuthenticatedLog::recover`] proves the current data tree consistent
+    /// with. The pair comes from a signed checkpoint kept where the store's
+    /// writer cannot reach it.
     pub fn open_trusting(store: S, keys: Keys, size: u64, root: [u8; 32]) -> Result<Self, Error> {
         let mut this = Self::open(store, keys)?;
         this.trusted = Some((size, root));
@@ -572,32 +660,57 @@ impl<S: TileStore> Store<S> {
         &self.live
     }
 
-    /// The number of entries in the tree.
+    /// The number of entries in the data tree.
     #[must_use]
     pub fn size(&self) -> u64 {
-        self.writer.size()
+        self.data.size()
     }
 
-    /// The root of the tree.
+    /// The root of the data tree.
     #[must_use]
     pub fn root(&self) -> [u8; 32] {
-        self.writer.root()
+        self.data.root()
     }
 
-    /// The underlying writer, for checkpoints.
+    /// The data writer, for checkpoints.
     pub fn writer(&self) -> &Writer<S> {
-        &self.writer
+        &self.data
     }
 
-    /// Lookups at the current tree, sharing this store's run cache.
+    /// The index log's writer when split, for its own checkpoint.
+    pub fn index_writer(&self) -> Option<&Writer<S>> {
+        self.manifests.as_ref()
+    }
+
+    fn manifest_writer(&self) -> &Writer<S> {
+        self.manifests.as_ref().unwrap_or(&self.data)
+    }
+
+    fn manifest_store(&self) -> &S {
+        self.manifest_writer().store()
+    }
+
+    /// Lookups at the current trees, sharing this store's run cache.
     pub fn index(&self) -> Result<Index<&S>, Error> {
-        Index::with_cache(
-            self.writer.store(),
-            self.writer.size(),
-            self.writer.root(),
-            Arc::clone(&self.keys),
-            Arc::clone(&self.cache),
-        )
+        match &self.manifests {
+            None => Index::with_cache(
+                self.data.store(),
+                self.data.size(),
+                self.data.root(),
+                Arc::clone(&self.keys),
+                Arc::clone(&self.cache),
+            ),
+            Some(manifests) => Index::at_split(
+                self.data.store(),
+                self.data.size(),
+                self.data.root(),
+                manifests.store(),
+                manifests.size(),
+                manifests.root(),
+                Arc::clone(&self.keys),
+                Arc::clone(&self.cache),
+            ),
+        }
     }
 
     /// Appends entries in order and returns their index range; the batch is
@@ -613,20 +726,22 @@ impl<S: TileStore> Store<S> {
                 "an entry may not start with the manifest magic",
             ));
         }
-        Ok(self.writer.append_batch(entries)?)
+        Ok(self.data.append_batch(entries)?)
     }
 
     fn reload_live(&mut self) -> Result<(), Error> {
+        let shared = self.manifests.is_none();
+        let writer = self.manifest_writer();
         let reader = Reader::at(
-            self.writer.store(),
-            self.writer.size(),
-            self.writer.root(),
+            writer.store(),
+            writer.size(),
+            writer.root(),
             tiles_keys(&self.keys),
         )?;
-        let (live, rebuilt) = load_live(&reader, self.writer.size())?;
+        let (live, rebuilt) = load_live(&reader, writer.size(), shared)?;
         drop(reader);
         if rebuilt {
-            save_live(self.writer.store(), &live)?;
+            save_live(self.manifest_store(), &live)?;
         }
         self.live = live;
         Ok(())
@@ -644,7 +759,7 @@ impl<S: TileStore> Store<S> {
     ) -> Result<RunManifest, Error> {
         let bytes = Run::encode(&entries, &pairs)?;
         let path = run_path(&entries);
-        if !self.writer.store().create_new(&path, &bytes)? {
+        if !self.manifest_store().create_new(&path, &bytes)? {
             return Err(Error::Tree("a run for that entry range is already stored"));
         }
         let (key_lo, key_hi) = match (pairs.first(), pairs.last()) {
@@ -658,8 +773,17 @@ impl<S: TileStore> Store<S> {
             run_hash: identity(&bytes),
             manifest_index: None,
         };
-        let logged = Logged { run, replaced };
-        let manifest_index = self.writer.append(&logged.encode()?)?;
+        let logged = Logged {
+            run,
+            data_size: self.data.size(),
+            data_root: self.data.root(),
+            replaced,
+        };
+        let encoded = logged.encode()?;
+        let manifest_index = match &mut self.manifests {
+            Some(manifests) => manifests.append(&encoded)?,
+            None => self.data.append(&encoded)?,
+        };
         let mut run = logged.run;
         run.manifest_index = Some(manifest_index);
         Ok(run)
@@ -683,7 +807,7 @@ impl<S: TileStore> AuthenticatedLog for Store<S> {
         let index = self.index()?;
         index.require_coverage()?;
         let lo = self.last_sealed().map_or(0, |last| last + 1);
-        let size = self.writer.size();
+        let size = self.data.size();
         if lo >= size {
             return Err(Error::Tree("nothing to seal"));
         }
@@ -698,7 +822,7 @@ impl<S: TileStore> AuthenticatedLog for Store<S> {
         pairs.dedup();
         let run = self.log_run(lo..=size - 1, pairs, Vec::new())?;
         self.live.push(run.clone());
-        save_live(self.writer.store(), &self.live)?;
+        save_live(self.manifest_store(), &self.live)?;
         Ok(run)
     }
 
@@ -723,7 +847,7 @@ impl<S: TileStore> AuthenticatedLog for Store<S> {
         let run = self.log_run(lo..=hi, merged.into_iter().collect(), replaced.clone())?;
         let written = run.manifest_index.expect("logged");
         self.live = vec![run];
-        save_live(self.writer.store(), &self.live)?;
+        save_live(self.manifest_store(), &self.live)?;
         Ok(Compaction { replaced, written })
     }
 
@@ -731,7 +855,7 @@ impl<S: TileStore> AuthenticatedLog for Store<S> {
         let (checkpoint_size, checkpoint_root) = self
             .trusted
             .ok_or(Error::Tree("no trusted checkpoint to recover from"))?;
-        let size = self.writer.size();
+        let size = self.data.size();
         if checkpoint_size > size {
             return Err(Error::Tampered { what: "tree state" });
         }
@@ -751,14 +875,14 @@ impl<S: TileStore> AuthenticatedLog for Store<S> {
                 old_size,
                 &rfc9162::hex(&checkpoint_root),
                 new_size,
-                &rfc9162::hex(&self.writer.root()),
+                &rfc9162::hex(&self.data.root()),
                 &consistency,
             )
         {
             return Err(Error::Tampered { what: "tree state" });
         }
         self.reload_live()?;
-        let (quarantined, _) = self.writer.quarantined();
+        let (quarantined, _) = self.data.quarantined();
         Ok(Recovery {
             checkpoint_size,
             replayed: size - checkpoint_size,
