@@ -5,6 +5,13 @@ The crates carry the one workspace version and are released together.
 
 <!-- towncrier release notes start -->
 
+## 0.8.1 (2026-11-08)
+
+### Fixes
+
+- `rfc9162-tiles`: a reader at an older size reads a partial tile or bundle the writer has since widened from the widest partial or the full one, whose prefix it is. With a writer keeping only the widest partial, a reader at a signed checkpoint behind the tail failed with a missing tile.
+
+
 ## 0.8.0 (2026-11-08)
 
 ### Features
