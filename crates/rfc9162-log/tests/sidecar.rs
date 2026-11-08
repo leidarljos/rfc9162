@@ -158,3 +158,64 @@ fn a_tampered_blob_is_refused() {
         Err(rfc9162_log::Error::Tampered { what: "blob" })
     ));
 }
+
+#[test]
+fn syncing_a_directory_records_what_changed_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    let write = |rel: &str, bytes: &[u8]| {
+        let path = project.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    };
+    write("etc/hosts", b"127.0.0.1 localhost\n");
+    write("etc/ssh/sshd_config", b"Port 22\n");
+    write("etc/motd", b"welcome\n");
+    write(".sidecar/notes", b"not the project's");
+    std::os::unix::fs::symlink("hosts", project.join("etc/hosts.link")).unwrap();
+    let store = PackStore::open(project.join(".sidecar/pack")).unwrap();
+    let mut sidecar = Sidecar::open(&store).unwrap();
+    let first = sidecar
+        .sync_dir(&project, &[".sidecar"], &meta("sync"))
+        .unwrap();
+    assert_eq!(
+        first.added,
+        vec!["etc/hosts", "etc/motd", "etc/ssh/sshd_config"]
+    );
+    assert!(first.changed.is_empty() && first.deleted.is_empty());
+    assert_eq!((first.unchanged, first.entries.clone()), (0, 0..3));
+
+    // Nothing changed: nothing appended.
+    let again = sidecar
+        .sync_dir(&project, &[".sidecar"], &meta("sync"))
+        .unwrap();
+    assert_eq!(again.unchanged, 3);
+    assert_eq!(again.entries, 3..3);
+    assert_eq!(sidecar.size(), 3);
+
+    write("etc/ssh/sshd_config", b"Port 2222\n");
+    write("etc/ssh/banner", b"keep out\n");
+    std::fs::remove_file(project.join("etc/motd")).unwrap();
+    let third = sidecar
+        .sync_dir(&project, &[".sidecar"], &meta("sync"))
+        .unwrap();
+    assert_eq!(third.added, vec!["etc/ssh/banner"]);
+    assert_eq!(third.changed, vec!["etc/ssh/sshd_config"]);
+    assert_eq!(third.deleted, vec!["etc/motd"]);
+    assert_eq!((third.unchanged, third.entries.clone()), (1, 3..6));
+    let tree = sidecar.tree_at(sidecar.size()).unwrap();
+    assert_eq!(
+        tree.keys().cloned().collect::<Vec<_>>(),
+        vec!["etc/hosts", "etc/ssh/banner", "etc/ssh/sshd_config"]
+    );
+    let config = sidecar.history("etc/ssh/sshd_config").unwrap();
+    assert_eq!(config.len(), 2);
+    assert_eq!(
+        sidecar
+            .blob(config[1].change.blob.as_ref().unwrap())
+            .unwrap()
+            .as_deref(),
+        Some(&b"Port 2222\n"[..])
+    );
+    assert_eq!(config[1].change.meta["actor"], "sync");
+}

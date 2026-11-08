@@ -1,0 +1,1 @@
+`Sidecar::sync_dir` records the regular files under a directory against the tree the log holds, the way etckeeper commits `/etc`: a file the log lacks or holds with other bytes is a put, a path the directory lacks is a delete, an unchanged file is left alone, and every change goes in one batch after its blob.
