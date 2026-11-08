@@ -82,6 +82,11 @@ pub struct Compaction {
 /// What recovery proved after a crash: the checkpoint it started from, the
 /// entries replayed beyond it, and that the recovered tree is consistent
 /// with the checkpoint by [`rfc9162::verify_consistency`].
+///
+/// The checkpoint recovery starts from is the largest size a trusted key
+/// signed, read from a record the store's writer cannot reach: a store that
+/// can rewrite its own tree state or hand back an older signed checkpoint
+/// would otherwise shorten the log and keep every proof valid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recovery {
     /// Tree size the last signed checkpoint covered.
@@ -102,7 +107,11 @@ pub trait AuthenticatedLog {
     /// Append one entry; returns its log index.
     fn append(&mut self, entry: &[u8]) -> Result<u64, Error>;
 
-    /// Every entry carrying `key`, each with the run that located it.
+    /// Every entry carrying `key`, each with the run that located it. An
+    /// empty answer is proven, not assumed: the logged runs' entry ranges
+    /// cover every index below the checkpoint size except the scanned
+    /// tail, or the answer is [`Error::Tree`], since a withheld run file
+    /// would otherwise hide an entry without doctoring any bytes.
     fn find(&self, key: &[u8]) -> Result<Vec<Located>, Error>;
 
     /// Every entry whose keys fall in `range`, in key order, with their runs.
