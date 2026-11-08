@@ -270,6 +270,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfc9162-log"
+version = "0.6.1"
+dependencies = [
+ "rfc9162",
+ "rfc9162-tiles",
+]
+
+[[package]]
 name = "rfc9162-tiles"
 version = "0.6.1"
 dependencies = [
