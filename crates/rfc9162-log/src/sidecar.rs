@@ -21,7 +21,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use rfc9162_tiles::{Note, Signer, TileStore};
+use rfc9162_tiles::checkpoint::verify;
+use rfc9162_tiles::{Checkpoint, Note, Signer, TileStore, Verifier};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -36,6 +37,9 @@ pub enum Op {
     Put,
     /// The path is gone.
     Delete,
+    /// The path is a child project, and this is its signed checkpoint,
+    /// verified against a trusted key before it was logged.
+    Checkpoint,
 }
 
 /// One change to one path, as the log records it.
@@ -53,6 +57,12 @@ pub struct Change {
     /// Length of the bytes, for a put.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
+    /// The child's checkpoint origin, for a checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// The child's signed checkpoint note, as text, for a checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// Whatever the caller records with the change: an actor, a job, a
     /// reason. Keys and values are stored as given.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -81,6 +91,9 @@ pub fn sidecar_keys() -> Keys {
         let mut keys = vec![format!("path={}", change.path).into_bytes()];
         if let Some(blob) = &change.blob {
             keys.push(format!("blob={blob}").into_bytes());
+        }
+        if let Some(origin) = &change.origin {
+            keys.push(format!("origin={origin}").into_bytes());
         }
         keys
     })
@@ -158,6 +171,8 @@ impl<S: TileStore> Sidecar<S> {
             path: path.to_string(),
             blob: Some(hex),
             size: Some(bytes.len() as u64),
+            origin: None,
+            note: None,
             meta,
         };
         self.append_change(&change)
@@ -172,6 +187,8 @@ impl<S: TileStore> Sidecar<S> {
             path: path.to_string(),
             blob: None,
             size: None,
+            origin: None,
+            note: None,
             meta,
         };
         self.append_change(&change)
@@ -274,9 +291,70 @@ impl<S: TileStore> Sidecar<S> {
                 Op::Delete => {
                     tree.remove(&change.path);
                 }
+                Op::Checkpoint => {}
             }
         }
         Ok(tree)
+    }
+
+    /// Logs a child project's signed checkpoint under `path`, so this log's
+    /// next checkpoint signs the child's. The note has to carry a signature
+    /// from one of `trusted`, and it has to extend the child's last logged
+    /// checkpoint: a smaller size, or the same size with another root, is
+    /// refused as an equivocation. The note is kept whole, so a reader
+    /// re-verifies it from the entry.
+    pub fn include_checkpoint(
+        &mut self,
+        path: &str,
+        note: &Note,
+        trusted: &[Verifier],
+        meta: BTreeMap<String, String>,
+    ) -> Result<u64, Error> {
+        check_path(path)?;
+        verify(note, trusted)?;
+        let checkpoint = Checkpoint::parse(&note.text)?;
+        if let Some((_, last)) = self.checkpoints(path)?.last() {
+            if last.origin != checkpoint.origin {
+                return Err(Error::Tree("a child checkpoint names another origin"));
+            }
+            if checkpoint.size < last.size
+                || (checkpoint.size == last.size && checkpoint.root != last.root)
+            {
+                return Err(Error::Tree(
+                    "a child checkpoint does not extend the one logged",
+                ));
+            }
+        }
+        let change = Change {
+            sidecar: 1,
+            op: Op::Checkpoint,
+            path: path.to_string(),
+            blob: None,
+            size: Some(checkpoint.size),
+            origin: Some(checkpoint.origin.clone()),
+            note: Some(note.to_text()),
+            meta,
+        };
+        self.append_change(&change)
+    }
+
+    /// The child checkpoints logged under `path`, oldest first, each parsed
+    /// from the note the entry keeps.
+    pub fn checkpoints(&self, path: &str) -> Result<Vec<(u64, Checkpoint)>, Error> {
+        let mut out = Vec::new();
+        for found in self.history(path)? {
+            if found.change.op != Op::Checkpoint {
+                continue;
+            }
+            let text = found
+                .change
+                .note
+                .as_deref()
+                .ok_or(Error::Tree("a checkpoint entry has no note"))?;
+            let checkpoint = Checkpoint::parse(&Note::parse(text)?.text)?;
+            out.push((found.index, checkpoint));
+        }
+        Ok(out)
     }
 
     /// Seals the unsealed tail into a run, when there is one, and signs the
@@ -366,6 +444,8 @@ impl<S: TileStore> Sidecar<S> {
                 path,
                 blob: Some(hex),
                 size: Some(bytes.len() as u64),
+                origin: None,
+                note: None,
                 meta: meta.clone(),
             };
             lines.push(
@@ -381,6 +461,8 @@ impl<S: TileStore> Sidecar<S> {
                     path: path.clone(),
                     blob: None,
                     size: None,
+                    origin: None,
+                    note: None,
                     meta: meta.clone(),
                 };
                 lines.push(

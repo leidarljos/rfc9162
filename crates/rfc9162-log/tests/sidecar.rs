@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use ed25519_dalek::SigningKey;
 use rfc9162::{hex, leaf_hash, verify_inclusion};
 use rfc9162_log::{Op, Sidecar};
-use rfc9162_tiles::{Checkpoint, Note, PackStore, Signer, TileStore};
+use rfc9162_tiles::{Checkpoint, Note, PackStore, Signer, TileStore, Verifier};
 
 fn meta(actor: &str) -> BTreeMap<String, String> {
     BTreeMap::from([("actor".to_string(), actor.to_string())])
@@ -218,4 +218,56 @@ fn syncing_a_directory_records_what_changed_and_nothing_else() {
         Some(&b"Port 2222\n"[..])
     );
     assert_eq!(config[1].change.meta["actor"], "sync");
+}
+
+#[test]
+fn a_parent_logs_its_children_s_checkpoints_and_refuses_an_equivocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let child_store = PackStore::open(dir.path().join("stack/.sidecar/pack")).unwrap();
+    let parent_store = PackStore::open(dir.path().join("site/.sidecar/pack")).unwrap();
+    let mut child = Sidecar::open(&child_store).unwrap();
+    let mut parent = Sidecar::open(&parent_store).unwrap();
+    let child_signer =
+        Signer::new("example.org/stack", SigningKey::from_bytes(&[1u8; 32])).unwrap();
+    let stranger = Signer::new("example.org/stack", SigningKey::from_bytes(&[2u8; 32])).unwrap();
+    let site_signer = Signer::new("example.org/site", SigningKey::from_bytes(&[3u8; 32])).unwrap();
+    let trusted: Vec<Verifier> = vec![child_signer.verifier()];
+
+    child.put("modules/A.lua", b"a", BTreeMap::new()).unwrap();
+    let first = child.snapshot(&child_signer, "example.org/stack").unwrap();
+    let at = parent
+        .include_checkpoint("stacks/2026", &first, &trusted, meta("site"))
+        .unwrap();
+    assert_eq!(at, 0);
+    child.put("modules/B.lua", b"b", BTreeMap::new()).unwrap();
+    let second = child.snapshot(&child_signer, "example.org/stack").unwrap();
+    parent
+        .include_checkpoint("stacks/2026", &second, &trusted, meta("site"))
+        .unwrap();
+
+    // The same, older checkpoint again is not an extension; a note from a
+    // key the parent does not trust is refused before anything is parsed.
+    assert!(parent
+        .include_checkpoint("stacks/2026", &first, &trusted, meta("site"))
+        .is_err());
+    let forged = stranger.sign(&Checkpoint::new("example.org/stack", 99, [0u8; 32]));
+    assert!(parent
+        .include_checkpoint("stacks/2026", &forged, &trusted, meta("site"))
+        .is_err());
+
+    let site = parent.snapshot(&site_signer, "example.org/site").unwrap();
+    let signed = Checkpoint::parse(&Note::parse(&site.to_text()).unwrap().text).unwrap();
+    assert_eq!(signed.size, parent.size());
+    let logged = parent.checkpoints("stacks/2026").unwrap();
+    assert_eq!(logged.len(), 2);
+    assert_eq!(logged[1].1.size, child.size());
+    assert_eq!(logged[1].1.root, child.root());
+    assert_eq!(logged[1].1.origin, "example.org/stack");
+    // The child's checkpoint entry is proven in the site's tree like any
+    // other change; its path does not enter the file tree.
+    let found = parent.history("stacks/2026").unwrap();
+    assert_eq!(found.len(), 2);
+    assert!(found[1].located.run.is_some());
+    assert!(parent.tree_at(parent.size()).unwrap().is_empty());
+    assert!(parent.under("stacks").unwrap().len() == 2);
 }

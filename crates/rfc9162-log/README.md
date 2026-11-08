@@ -33,8 +33,10 @@ appends one JSON entry (`{"sidecar":1,"op":"put","path":...,"blob":...,
 sorted runs, `tree_at(size)` the paths a snapshot holds, `diff(from, to)`
 the changes between two, `sync_dir(root, skip, meta)` records a directory
 against the tree in one batch, and `snapshot(signer, origin)` seals the
-tail into a run and signs the log. A third party proves any change from the
-checkpoint alone. Over a `PackStore` the sidecar is one file and its lock.
+tail into a run and signs the log. Projects nest: `include_checkpoint(path,
+note, trusted, meta)` logs a child's signed checkpoint under a path, so a
+site's log signs each stack's and a stack's each install's. A third party
+proves any change from the checkpoint alone. Over a `PackStore` the sidecar is one file and its lock.
 
 ```rust
 let store = rfc9162_tiles::PackStore::open(project.join(".sidecar/pack"))?;
