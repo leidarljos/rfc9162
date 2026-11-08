@@ -43,6 +43,25 @@ tree state. Partial tiles are removed once their full tile exists. A tree of 700
 full level-0 tiles, a partial of width 112, one full level-1 tile, a partial of width 17 and a
 partial level-2 tile of width 1.
 
+## One file instead of a tree
+
+`PackStore` keeps the same paths as records in one append-only file, so a
+log costs a constant number of inodes however long it grows: on a shared
+filesystem with an inode quota, a tree of 10^6 entries is about 12,000
+files as a directory and one as a pack. Each record ends in a SHA-256, so
+a torn tail is found and ignored; bodies that shrink under DEFLATE (entry
+bundles do, hash tiles do not) are stored compressed; `compact` rewrites
+the pack with one record per live path and renames it over the old one.
+The tree and every proof are untouched, since they are over entry bytes.
+One writer holds `<pack>.lock` and removes it on drop; a crash leaves it
+and `PackStore::break_lock` removes it. Readers open the pack without a
+lock, see a writer's appends, and reopen after a compaction.
+
+```rust
+let store = rfc9162_tiles::PackStore::open(dir.join("pack"))?;
+let mut writer = rfc9162_tiles::Writer::open(&store, rfc9162_tiles::index::no_keys())?;
+```
+
 ## Keys
 
 `Writer::open` and `Reader::open` take a key function, `Fn(&[u8]) -> Vec<Vec<u8>>`, that derives the
