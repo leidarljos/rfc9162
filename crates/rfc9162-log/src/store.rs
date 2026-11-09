@@ -278,7 +278,10 @@ impl Run {
     }
 
     #[cfg(test)]
-    fn encode_v1(entries: &RangeInclusive<u64>, pairs: &[(Vec<u8>, u64)]) -> Result<Vec<u8>, Error> {
+    fn encode_v1(
+        entries: &RangeInclusive<u64>,
+        pairs: &[(Vec<u8>, u64)],
+    ) -> Result<Vec<u8>, Error> {
         let mut out = RUN_MAGIC_V1.to_vec();
         put_u64(&mut out, *entries.start());
         put_u64(&mut out, *entries.end());
@@ -1002,9 +1005,18 @@ mod tests {
         let mut pairs: Vec<(Vec<u8>, u64)> = (0u64..300)
             .flat_map(|i| {
                 [
-                    (format!("module=GROMACS/2026.{}-foss-2026.1", i % 7).into_bytes(), 1000 + i),
-                    (format!("path=software/PETSc/3.24.{i}/lib/libpetsc.so").into_bytes(), 1000 + i),
-                    (format!("target=x86_64/amd/zen{}", 2 + i % 3).into_bytes(), 1000 + i),
+                    (
+                        format!("module=GROMACS/2026.{}-foss-2026.1", i % 7).into_bytes(),
+                        1000 + i,
+                    ),
+                    (
+                        format!("path=software/PETSc/3.24.{i}/lib/libpetsc.so").into_bytes(),
+                        1000 + i,
+                    ),
+                    (
+                        format!("target=x86_64/amd/zen{}", 2 + i % 3).into_bytes(),
+                        1000 + i,
+                    ),
                 ]
             })
             .collect();
@@ -1065,7 +1077,10 @@ mod tests {
         put_varint(&mut bytes, 0);
         put_varint(&mut bytes, 0);
         let expect = manifest(entries, &bytes);
-        assert!(matches!(Run::decode(&bytes, &expect), Err(Error::Tampered { .. })));
+        assert!(matches!(
+            Run::decode(&bytes, &expect),
+            Err(Error::Tampered { .. })
+        ));
     }
 
     #[test]
@@ -1078,7 +1093,10 @@ mod tests {
         // pair's offset of 5 lands on 15, outside 10..=11.
         patched[RUN_MAGIC.len() + 8..RUN_MAGIC.len() + 16].copy_from_slice(&11u64.to_be_bytes());
         let expect = manifest(entries, &patched);
-        assert!(matches!(Run::decode(&patched, &expect), Err(Error::Tampered { .. })));
+        assert!(matches!(
+            Run::decode(&patched, &expect),
+            Err(Error::Tampered { .. })
+        ));
     }
 
     #[test]

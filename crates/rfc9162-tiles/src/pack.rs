@@ -635,8 +635,7 @@ fn read_index(inner: &mut Inner, file_len: u64) -> io::Result<()> {
     let at = inner.valid_len;
     let mut head = [0u8; HEAD_LEN];
     inner.file.seek(SeekFrom::Start(at))?;
-    if inner.file.read_exact(&mut head).is_err() || head[0] != KIND_INDEX || head[1] != CODEC_RAW
-    {
+    if inner.file.read_exact(&mut head).is_err() || head[0] != KIND_INDEX || head[1] != CODEC_RAW {
         return Ok(());
     }
     let path_len = u16::from_be_bytes([head[2], head[3]]) as usize;
@@ -706,7 +705,9 @@ fn parse_index(body: &[u8], first: u64) -> Option<(u64, Vec<(String, Slot)>)> {
     for _ in 0..n {
         let len = u16::from_be_bytes(body.get(at..at + 2)?.try_into().ok()?) as usize;
         at += 2;
-        let path = std::str::from_utf8(body.get(at..at + len)?).ok()?.to_string();
+        let path = std::str::from_utf8(body.get(at..at + len)?)
+            .ok()?
+            .to_string();
         at += len;
         let row = body.get(at..at + INDEX_PER_PATH - 2)?;
         at += INDEX_PER_PATH - 2;
@@ -799,13 +800,18 @@ mod tests {
     use super::*;
 
     fn body(i: usize) -> Vec<u8> {
-        format!("{{\"module\":\"PETSc/3.24.{i}-foss-2026.1\",\"pad\":\"{}\"}}", "x".repeat(200))
-            .into_bytes()
+        format!(
+            "{{\"module\":\"PETSc/3.24.{i}-foss-2026.1\",\"pad\":\"{}\"}}",
+            "x".repeat(200)
+        )
+        .into_bytes()
     }
 
     fn fill(store: &PackStore, n: usize) {
         for i in 0..n {
-            store.put(&format!("tile/entries/{i:03}"), &body(i)).unwrap();
+            store
+                .put(&format!("tile/entries/{i:03}"), &body(i))
+                .unwrap();
         }
         store.put("tile/entries/000", b"rewritten").unwrap();
         store.delete("tile/entries/001").unwrap();
@@ -813,12 +819,18 @@ mod tests {
     }
 
     fn check(store: &PackStore, n: usize) {
-        assert_eq!(store.get("tile/entries/000").unwrap().as_deref(), Some(&b"rewritten"[..]));
+        assert_eq!(
+            store.get("tile/entries/000").unwrap().as_deref(),
+            Some(&b"rewritten"[..])
+        );
         assert_eq!(store.get("tile/entries/001").unwrap(), None);
         assert_eq!(store.get("tile/entries/002").unwrap(), None);
         assert_eq!(store.get("moved/two").unwrap(), Some(body(2)));
         for i in 3..n {
-            assert_eq!(store.get(&format!("tile/entries/{i:03}")).unwrap(), Some(body(i)));
+            assert_eq!(
+                store.get(&format!("tile/entries/{i:03}")).unwrap(),
+                Some(body(i))
+            );
         }
     }
 
@@ -839,7 +851,10 @@ mod tests {
             let inner = reader.inner.lock().unwrap();
             assert_eq!(inner.valid_len, std::fs::metadata(&pack).unwrap().len());
         }
-        assert_eq!(reader.get("after/compaction").unwrap().as_deref(), Some(&b"tail"[..]));
+        assert_eq!(
+            reader.get("after/compaction").unwrap().as_deref(),
+            Some(&b"tail"[..])
+        );
         assert_eq!(reader.get("moved/three").unwrap(), Some(body(3)));
         assert_eq!(reader.get("tile/entries/003").unwrap(), None);
         assert_eq!(reader.get("moved/two").unwrap(), Some(body(2)));
@@ -917,7 +932,16 @@ mod tests {
         let mut bytes = PACK_MAGIC_V1.to_vec();
         for i in 0..5 {
             let raw = body(i);
-            bytes.extend(encode_stored(KIND_PUT, CODEC_RAW, &format!("p/{i}"), &raw, raw.len() as u32).unwrap());
+            bytes.extend(
+                encode_stored(
+                    KIND_PUT,
+                    CODEC_RAW,
+                    &format!("p/{i}"),
+                    &raw,
+                    raw.len() as u32,
+                )
+                .unwrap(),
+            );
         }
         std::fs::write(&pack, &bytes).unwrap();
         let store = PackStore::open(&pack).unwrap();
