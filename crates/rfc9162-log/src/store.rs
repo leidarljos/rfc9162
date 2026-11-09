@@ -18,7 +18,12 @@
 //! - `runs/<lo>-<hi>`: one sealed run, the sorted `(key, index)` pairs of
 //!   data entries `lo..=hi` and a Bloom filter over the keys, in the format
 //!   `RUN_MAGIC` describes. Its SHA-256 is the `run_hash` the logged manifest
-//!   carries, so a reader checks the file before trusting a seek.
+//!   carries, so a reader checks the file before trusting a seek. The writer
+//!   writes format v2: each key is stored as the length it shares with the
+//!   key before it and the bytes that follow (front coding), and each index
+//!   as a LEB128 varint offset from `lo`. Runs written as v1 (every key and
+//!   index in full) stay readable; the manifest binds the file's hash, not
+//!   its format.
 //! - `runs/live`: the manifest indices of the runs a lookup goes through, one
 //!   per line, oldest first. A cache: when it is missing or stale the live set
 //!   is rebuilt from the manifest entries in the log.
@@ -46,8 +51,10 @@ use crate::{AuthenticatedLog, Compaction, Error, Inclusion, Located, Recovery, R
 
 /// First bytes of a logged run manifest.
 pub const MANIFEST_MAGIC: &[u8] = b"rfc9162-log/manifest/v2\n";
-/// First bytes of a run file.
-pub const RUN_MAGIC: &[u8] = b"rfc9162-log/run/v1\n";
+/// First bytes of a run file as the writer writes it (format v2).
+pub const RUN_MAGIC: &[u8] = b"rfc9162-log/run/v2\n";
+/// First bytes of a run file in format v1, which readers still accept.
+pub const RUN_MAGIC_V1: &[u8] = b"rfc9162-log/run/v1\n";
 const LIVE: &str = "runs/live";
 const BITS_PER_KEY: usize = 10;
 
@@ -87,6 +94,19 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
+fn put_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// Bytes `a` and `b` share at their start.
+fn shared_prefix(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 struct Cursor<'a> {
     bytes: &'a [u8],
     at: usize,
@@ -118,6 +138,22 @@ impl<'a> Cursor<'a> {
         let b = self.take(2)?;
         let len = u16::from_be_bytes(b.try_into().expect("two bytes")) as usize;
         self.take(len)
+    }
+    /// A LEB128 varint of at most ten bytes whose value fits in a `u64`.
+    fn varint(&mut self) -> Result<u64, Error> {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let byte = self.take(1)?[0];
+            let low = u64::from(byte & 0x7f);
+            if shift == 63 && low > 1 {
+                return Err(Error::Tampered { what: self.what });
+            }
+            value |= low << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        Err(Error::Tampered { what: self.what })
     }
     fn done(&self) -> Result<(), Error> {
         if self.at == self.bytes.len() {
@@ -214,7 +250,36 @@ pub struct Run {
 
 impl Run {
     fn encode(entries: &RangeInclusive<u64>, pairs: &[(Vec<u8>, u64)]) -> Result<Vec<u8>, Error> {
+        let lo = *entries.start();
         let mut out = RUN_MAGIC.to_vec();
+        put_u64(&mut out, lo);
+        put_u64(&mut out, *entries.end());
+        put_varint(&mut out, pairs.len() as u64);
+        let mut previous: &[u8] = &[];
+        for (key, index) in pairs {
+            if key.len() > usize::from(u16::MAX) {
+                return Err(Error::Tree("key over 65535 bytes"));
+            }
+            let offset = index
+                .checked_sub(lo)
+                .ok_or(Error::Tree("a run pair below the run's entry range"))?;
+            let shared = shared_prefix(previous, key);
+            put_varint(&mut out, shared as u64);
+            put_varint(&mut out, (key.len() - shared) as u64);
+            out.extend_from_slice(&key[shared..]);
+            put_varint(&mut out, offset);
+            previous = key;
+        }
+        let keys: Vec<&[u8]> = pairs.iter().map(|(k, _)| k.as_slice()).collect();
+        let filter = Bloom::build(&keys, BITS_PER_KEY).to_bytes();
+        put_varint(&mut out, filter.len() as u64);
+        out.extend_from_slice(&filter);
+        Ok(out)
+    }
+
+    #[cfg(test)]
+    fn encode_v1(entries: &RangeInclusive<u64>, pairs: &[(Vec<u8>, u64)]) -> Result<Vec<u8>, Error> {
+        let mut out = RUN_MAGIC_V1.to_vec();
         put_u64(&mut out, *entries.start());
         put_u64(&mut out, *entries.end());
         let n = u32::try_from(pairs.len()).map_err(|_| Error::Tree("too many pairs in a run"))?;
@@ -236,9 +301,13 @@ impl Run {
         if identity(bytes) != expect.run_hash {
             return Err(Error::Tampered { what });
         }
-        let body = bytes
-            .strip_prefix(RUN_MAGIC)
-            .ok_or(Error::Tampered { what })?;
+        let (v2, body) = if let Some(body) = bytes.strip_prefix(RUN_MAGIC) {
+            (true, body)
+        } else if let Some(body) = bytes.strip_prefix(RUN_MAGIC_V1) {
+            (false, body)
+        } else {
+            return Err(Error::Tampered { what });
+        };
         let mut c = Cursor {
             bytes: body,
             at: 0,
@@ -249,11 +318,33 @@ impl Run {
         if lo != *expect.entries.start() || hi != *expect.entries.end() {
             return Err(Error::Tampered { what });
         }
-        let n = c.u32()?;
-        let mut pairs = Vec::with_capacity(n as usize);
+        let n = if v2 { c.varint()? } else { u64::from(c.u32()?) };
+        // A pair takes at least three bytes in v2 and ten in v1, so a count the
+        // body cannot hold is refused before anything is allocated for it.
+        if n > (body.len() as u64) / 3 {
+            return Err(Error::Tampered { what });
+        }
+        let mut pairs: Vec<(Vec<u8>, u64)> = Vec::with_capacity(n as usize);
         for _ in 0..n {
-            let key = c.bytes()?.to_vec();
-            let index = c.u64()?;
+            let (key, index) = if v2 {
+                let shared = c.varint()?;
+                let unshared = c.varint()?;
+                let previous = pairs.last().map(|(k, _)| k.as_slice()).unwrap_or(&[]);
+                if shared > previous.len() as u64
+                    || shared.saturating_add(unshared) > u64::from(u16::MAX)
+                {
+                    return Err(Error::Tampered { what });
+                }
+                let mut key = previous[..shared as usize].to_vec();
+                key.extend_from_slice(c.take(unshared as usize)?);
+                let index = lo
+                    .checked_add(c.varint()?)
+                    .ok_or(Error::Tampered { what })?;
+                (key, index)
+            } else {
+                let key = c.bytes()?.to_vec();
+                (key, c.u64()?)
+            };
             if !expect.entries.contains(&index) {
                 return Err(Error::Tampered { what });
             }
@@ -262,7 +353,8 @@ impl Run {
         if pairs.windows(2).any(|w| w[0] >= w[1]) {
             return Err(Error::Tampered { what });
         }
-        let len = c.u32()? as usize;
+        let len = if v2 { c.varint()? } else { u64::from(c.u32()?) };
+        let len = usize::try_from(len).map_err(|_| Error::Tampered { what })?;
         let filter = Bloom::from_bytes(c.take(len)?).map_err(|_| Error::Tampered { what })?;
         c.done()?;
         Ok(Self { pairs, filter })
@@ -899,5 +991,111 @@ impl From<rfc9162_tiles::Error> for Error {
             rfc9162_tiles::Error::Corrupt { .. } => Self::Tampered { what: "tile store" },
             other => Self::Tiles(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pairs() -> Vec<(Vec<u8>, u64)> {
+        let mut pairs: Vec<(Vec<u8>, u64)> = (0u64..300)
+            .flat_map(|i| {
+                [
+                    (format!("module=GROMACS/2026.{}-foss-2026.1", i % 7).into_bytes(), 1000 + i),
+                    (format!("path=software/PETSc/3.24.{i}/lib/libpetsc.so").into_bytes(), 1000 + i),
+                    (format!("target=x86_64/amd/zen{}", 2 + i % 3).into_bytes(), 1000 + i),
+                ]
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    fn manifest(entries: RangeInclusive<u64>, bytes: &[u8]) -> RunManifest {
+        RunManifest {
+            entries,
+            key_lo: Vec::new(),
+            key_hi: Vec::new(),
+            run_hash: identity(bytes),
+            manifest_index: None,
+        }
+    }
+
+    #[test]
+    fn v2_round_trips_and_answers_lookups() {
+        let entries = 1000..=1299;
+        let pairs = pairs();
+        let bytes = Run::encode(&entries, &pairs).unwrap();
+        assert!(bytes.starts_with(RUN_MAGIC));
+        let run = Run::decode(&bytes, &manifest(entries, &bytes)).unwrap();
+        assert_eq!(run.pairs, pairs);
+        assert_eq!(run.indices_of(b"target=x86_64/amd/zen3").len(), 100);
+        assert!(run.indices_of(b"target=x86_64/amd/zen5").is_empty());
+    }
+
+    #[test]
+    fn v1_runs_stay_readable() {
+        let entries = 1000..=1299;
+        let pairs = pairs();
+        let bytes = Run::encode_v1(&entries, &pairs).unwrap();
+        let run = Run::decode(&bytes, &manifest(entries, &bytes)).unwrap();
+        assert_eq!(run.pairs, pairs);
+    }
+
+    #[test]
+    fn v2_is_smaller_than_v1_on_shared_prefixes() {
+        let entries = 1000..=1299;
+        let pairs = pairs();
+        let v1 = Run::encode_v1(&entries, &pairs).unwrap().len();
+        let v2 = Run::encode(&entries, &pairs).unwrap().len();
+        assert!(v2 * 2 < v1, "v2 {v2} bytes, v1 {v1} bytes");
+    }
+
+    #[test]
+    fn a_shared_length_past_the_previous_key_is_refused() {
+        let entries = 0..=0;
+        let mut bytes = RUN_MAGIC.to_vec();
+        put_u64(&mut bytes, 0);
+        put_u64(&mut bytes, 0);
+        put_varint(&mut bytes, 1);
+        put_varint(&mut bytes, 3);
+        put_varint(&mut bytes, 1);
+        bytes.push(b'k');
+        put_varint(&mut bytes, 0);
+        put_varint(&mut bytes, 0);
+        let expect = manifest(entries, &bytes);
+        assert!(matches!(Run::decode(&bytes, &expect), Err(Error::Tampered { .. })));
+    }
+
+    #[test]
+    fn an_index_outside_the_run_is_refused() {
+        let entries = 10..=11;
+        let bytes = Run::encode(&(10..=20), &[(b"k".to_vec(), 15)]).unwrap();
+        let mut patched = RUN_MAGIC.to_vec();
+        patched.extend_from_slice(&bytes[RUN_MAGIC.len()..]);
+        // Rewrite the header so lo and hi match the manifest while the
+        // pair's offset of 5 lands on 15, outside 10..=11.
+        patched[RUN_MAGIC.len() + 8..RUN_MAGIC.len() + 16].copy_from_slice(&11u64.to_be_bytes());
+        let expect = manifest(entries, &patched);
+        assert!(matches!(Run::decode(&patched, &expect), Err(Error::Tampered { .. })));
+    }
+
+    #[test]
+    fn an_overlong_varint_is_refused() {
+        let mut c = Cursor {
+            bytes: &[0xff; 11],
+            at: 0,
+            what: "test",
+        };
+        assert!(c.varint().is_err());
+        let mut out = Vec::new();
+        put_varint(&mut out, u64::MAX);
+        let mut c = Cursor {
+            bytes: &out,
+            at: 0,
+            what: "test",
+        };
+        assert_eq!(c.varint().unwrap(), u64::MAX);
     }
 }
