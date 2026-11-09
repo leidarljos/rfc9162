@@ -779,8 +779,7 @@ fn scan(inner: &mut Inner) -> io::Result<()> {
                 };
                 let to = to.to_string();
                 if let Some(moved) = inner.live.remove(path) {
-                    inner.live_bytes -=
-                        (HEAD_LEN + path.len() + DIGEST_LEN) as u64 + u64::from(moved.stored);
+                    inner.live_bytes -= live_cost(path, &moved);
                     record_live(inner, &to, moved);
                 }
             }
