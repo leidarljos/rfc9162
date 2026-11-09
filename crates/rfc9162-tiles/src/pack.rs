@@ -381,6 +381,9 @@ fn load(path: &Path, writer: bool) -> io::Result<Inner> {
         if v2 {
             read_index(&mut inner, len)?;
         }
+        if v2 && inner.valid_len == PACK_MAGIC.len() as u64 {
+            skip_unusable_index(&mut inner, len)?;
+        }
         scan(&mut inner)?;
     }
     Ok(inner)
@@ -666,6 +669,26 @@ fn read_index(inner: &mut Inner, file_len: u64) -> io::Result<()> {
     inner.live = live;
     inner.live_bytes = live_bytes;
     inner.valid_len = covered;
+    Ok(())
+}
+
+/// Steps over a first record that says it is an index but could not be
+/// used (a digest or a bound that did not hold), by the lengths its head
+/// declares, so the scan applies the records after it rather than stopping
+/// at it.
+fn skip_unusable_index(inner: &mut Inner, file_len: u64) -> io::Result<()> {
+    let at = inner.valid_len;
+    let mut head = [0u8; HEAD_LEN];
+    inner.file.seek(SeekFrom::Start(at))?;
+    if inner.file.read_exact(&mut head).is_err() || head[0] != KIND_INDEX {
+        return Ok(());
+    }
+    let path_len = u16::from_be_bytes([head[2], head[3]]) as u64;
+    let stored_len = u32::from_be_bytes([head[4], head[5], head[6], head[7]]) as u64;
+    let end = at + HEAD_LEN as u64 + path_len + stored_len + DIGEST_LEN as u64;
+    if end <= file_len {
+        inner.valid_len = end;
+    }
     Ok(())
 }
 
