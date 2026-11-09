@@ -9,6 +9,14 @@
 //! record that names it, so [`PackStore::compact`] rewrites the pack with
 //! one record per live path and renames it over the old one.
 //!
+//! A compaction also writes an index as the pack's first record: every live
+//! path with where its body sits, and the length of the pack the index
+//! covers. Opening such a pack reads the index and then only the records
+//! appended after the region it covers, rather than every record; a record
+//! the index named is checked against its digest when it is read. Packs
+//! written by format v1 (no index) open by reading every record, and become
+//! v2 at their next compaction.
+//!
 //! One writer at a time: the writer holds `<pack>.lock`, created
 //! exclusively and removed when the store is dropped, the way the tile
 //! log's own locks work; a crash leaves it, and [`PackStore::break_lock`]
@@ -27,12 +35,17 @@ use sha2::{Digest, Sha256};
 
 use crate::store::TileStore;
 
-/// The first bytes of a pack file.
-pub const PACK_MAGIC: &[u8] = b"rfc9162-tiles/pack/v1\n";
+/// The first bytes of a pack file as this version writes it (format v2,
+/// whose first record may be an index).
+pub const PACK_MAGIC: &[u8] = b"rfc9162-tiles/pack/v2\n";
+/// The first bytes of a pack file in format v1, which still opens.
+pub const PACK_MAGIC_V1: &[u8] = b"rfc9162-tiles/pack/v1\n";
 
 const KIND_PUT: u8 = 1;
 const KIND_DELETE: u8 = 2;
 const KIND_RENAME: u8 = 3;
+/// The live table a compaction writes as the first record of a v2 pack.
+const KIND_INDEX: u8 = 4;
 
 const CODEC_RAW: u8 = 0;
 const CODEC_DEFLATE: u8 = 1;
@@ -46,9 +59,24 @@ const DEFLATE_LEVEL: u8 = 6;
 const HEAD_LEN: usize = 1 + 1 + 2 + 4 + 4;
 const DIGEST_LEN: usize = 32;
 
+/// An index record's body: the covered length and the path count.
+const INDEX_FIXED: usize = 8 + 4;
+/// Per path in the index: path length, record start, body offset, stored,
+/// raw, codec.
+const INDEX_PER_PATH: usize = 2 + 8 + 8 + 4 + 4 + 1;
+
+/// Bytes the index record of a compacted pack takes for `paths` live paths
+/// whose names total `names` bytes.
+fn index_len(paths: usize, names: usize) -> u64 {
+    (HEAD_LEN + INDEX_FIXED + DIGEST_LEN + paths * INDEX_PER_PATH + names) as u64
+}
+
 /// Where a path's bytes sit in the pack.
 #[derive(Debug, Clone, Copy)]
 struct Slot {
+    /// Offset of the record that holds the body; a rename keeps the record,
+    /// whose path is then the old one.
+    start: u64,
     /// Offset of the stored body.
     offset: u64,
     stored: u32,
@@ -62,8 +90,8 @@ struct Inner {
     /// held. Records past it are a torn tail.
     valid_len: u64,
     live: BTreeMap<String, Slot>,
-    /// Bytes the live records occupy, body and framing; compaction is worth
-    /// it when the pack is much longer than this.
+    /// Bytes the live records occupy, body and framing, plus the magic and
+    /// the index a compaction writes: the pack's length after a compaction.
     live_bytes: u64,
     #[cfg(unix)]
     inode: u64,
@@ -153,8 +181,8 @@ impl PackStore {
         Ok(inner.live.is_empty())
     }
 
-    /// Bytes the live records occupy, framing and magic included: the pack
-    /// after a compaction is exactly this long.
+    /// Bytes the live records occupy, framing, magic and index included: the
+    /// pack after a compaction is exactly this long.
     pub fn live_bytes(&self) -> io::Result<u64> {
         let mut inner = self.inner.lock().unwrap();
         self.refresh(&mut inner)?;
@@ -172,22 +200,24 @@ impl PackStore {
         let temp = self.path.with_extension("compacting");
         let mut out = File::create(&temp)?;
         out.write_all(PACK_MAGIC)?;
-        let mut offset = PACK_MAGIC.len() as u64;
-        let mut live = BTreeMap::new();
-        let mut live_bytes = PACK_MAGIC.len() as u64;
         let current: Vec<(String, Slot)> = inner
             .live
             .iter()
             .map(|(path, slot)| (path.clone(), *slot))
             .collect();
+        let names: usize = current.iter().map(|(p, _)| p.len()).sum();
+        let first = PACK_MAGIC.len() as u64 + index_len(current.len(), names);
+        let mut offset = first;
+        let mut live = BTreeMap::new();
+        let mut records = Vec::with_capacity(current.len());
         for (path, slot) in &current {
-            let stored = read_stored(&mut inner.file, slot)?;
+            let stored = read_record(&mut inner.file, slot)?;
             let record = encode_stored(KIND_PUT, slot.codec, path, &stored, slot.raw)?;
-            out.write_all(&record)?;
             let body_at = offset + (HEAD_LEN + path.len()) as u64;
             live.insert(
                 path.clone(),
                 Slot {
+                    start: offset,
                     offset: body_at,
                     stored: slot.stored,
                     raw: slot.raw,
@@ -195,8 +225,15 @@ impl PackStore {
                 },
             );
             offset += record.len() as u64;
-            live_bytes += record.len() as u64;
+            records.push(record);
         }
+        let index = encode_index(offset, &live)?;
+        debug_assert_eq!(PACK_MAGIC.len() as u64 + index.len() as u64, first);
+        out.write_all(&index)?;
+        for record in &records {
+            out.write_all(record)?;
+        }
+        let live_bytes = offset;
         out.sync_all()?;
         drop(out);
         fs::rename(&temp, &self.path)?;
@@ -287,6 +324,7 @@ impl PackStore {
         inner.file.sync_data()?;
         inner.valid_len = at + record.len() as u64;
         Ok(Slot {
+            start: at,
             offset: at + (HEAD_LEN + path.len()) as u64,
             stored: stored.len() as u32,
             raw,
@@ -311,7 +349,7 @@ fn load(path: &Path, writer: bool) -> io::Result<Inner> {
         file,
         valid_len: 0,
         live: BTreeMap::new(),
-        live_bytes: PACK_MAGIC.len() as u64,
+        live_bytes: PACK_MAGIC.len() as u64 + index_len(0, 0),
         #[cfg(unix)]
         inode,
     };
@@ -329,16 +367,20 @@ fn load(path: &Path, writer: bool) -> io::Result<Inner> {
     } else {
         let mut magic = vec![0u8; PACK_MAGIC.len()];
         inner.file.seek(SeekFrom::Start(0))?;
-        match inner.file.read_exact(&mut magic) {
-            Ok(()) if magic == PACK_MAGIC => {}
+        let v2 = match inner.file.read_exact(&mut magic) {
+            Ok(()) if magic == PACK_MAGIC => true,
+            Ok(()) if magic == PACK_MAGIC_V1 => false,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("{} is not a pack", path.display()),
                 ))
             }
-        }
+        };
         inner.valid_len = PACK_MAGIC.len() as u64;
+        if v2 {
+            read_index(&mut inner, len)?;
+        }
         scan(&mut inner)?;
     }
     Ok(inner)
@@ -359,7 +401,7 @@ impl TileStore for PackStore {
         let Some(slot) = inner.live.get(path).copied() else {
             return Ok(None);
         };
-        let stored = read_stored(&mut inner.file, &slot)?;
+        let stored = read_record(&mut inner.file, &slot)?;
         Ok(Some(unpack(&slot, stored)?))
     }
 
@@ -493,11 +535,27 @@ fn encode_stored(kind: u8, codec: u8, path: &str, stored: &[u8], raw: u32) -> io
     Ok(out)
 }
 
-fn read_stored(file: &mut File, slot: &Slot) -> io::Result<Vec<u8>> {
-    let mut stored = vec![0u8; slot.stored as usize];
-    file.seek(SeekFrom::Start(slot.offset))?;
-    file.read_exact(&mut stored)?;
-    Ok(stored)
+/// The stored body of the `PUT` record at `slot`, checked against the
+/// record's digest and head: a record an index named was not read when the
+/// pack opened, so it is checked here.
+fn read_record(file: &mut File, slot: &Slot) -> io::Result<Vec<u8>> {
+    let corrupt = || io::Error::new(io::ErrorKind::InvalidData, "pack record fails its digest");
+    let body_at = usize::try_from(slot.offset - slot.start).map_err(|_| corrupt())?;
+    let mut record = vec![0u8; body_at + slot.stored as usize + DIGEST_LEN];
+    file.seek(SeekFrom::Start(slot.start))?;
+    file.read_exact(&mut record)?;
+    let (framed, digest) = record.split_at(record.len() - DIGEST_LEN);
+    let path_len = u16::from_be_bytes([framed[2], framed[3]]) as usize;
+    let stored_len = u32::from_be_bytes([framed[4], framed[5], framed[6], framed[7]]);
+    if Sha256::digest(framed).as_slice() != digest
+        || framed[0] != KIND_PUT
+        || framed[1] != slot.codec
+        || HEAD_LEN + path_len != body_at
+        || stored_len != slot.stored
+    {
+        return Err(corrupt());
+    }
+    Ok(framed[body_at..].to_vec())
 }
 
 fn unpack(slot: &Slot, stored: Vec<u8>) -> io::Result<Vec<u8>> {
@@ -522,18 +580,129 @@ fn unpack(slot: &Slot, stored: Vec<u8>) -> io::Result<Vec<u8>> {
     }
 }
 
+/// Bytes one live path costs a compacted pack: its record and its index row.
+fn live_cost(path: &str, slot: &Slot) -> u64 {
+    (HEAD_LEN + path.len() + DIGEST_LEN + INDEX_PER_PATH + path.len()) as u64
+        + u64::from(slot.stored)
+}
+
 fn record_live(inner: &mut Inner, path: &str, slot: Slot) {
-    let framing = (HEAD_LEN + path.len() + DIGEST_LEN) as u64 + u64::from(slot.stored);
     if let Some(old) = inner.live.insert(path.to_string(), slot) {
-        inner.live_bytes -= (HEAD_LEN + path.len() + DIGEST_LEN) as u64 + u64::from(old.stored);
+        inner.live_bytes -= live_cost(path, &old);
     }
-    inner.live_bytes += framing;
+    inner.live_bytes += live_cost(path, &slot);
 }
 
 fn drop_live(inner: &mut Inner, path: &str) {
     if let Some(old) = inner.live.remove(path) {
-        inner.live_bytes -= (HEAD_LEN + path.len() + DIGEST_LEN) as u64 + u64::from(old.stored);
+        inner.live_bytes -= live_cost(path, &old);
     }
+}
+
+/// The index record of a compacted pack: the length it covers and, per live
+/// path in path order, where the body sits.
+fn encode_index(covered: u64, live: &BTreeMap<String, Slot>) -> io::Result<Vec<u8>> {
+    let mut body = Vec::with_capacity(INDEX_FIXED + live.len() * INDEX_PER_PATH);
+    body.extend_from_slice(&covered.to_be_bytes());
+    let n = u32::try_from(live.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many paths"))?;
+    body.extend_from_slice(&n.to_be_bytes());
+    for (path, slot) in live {
+        let len = u16::try_from(path.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path over 64 KiB"))?;
+        body.extend_from_slice(&len.to_be_bytes());
+        body.extend_from_slice(path.as_bytes());
+        body.extend_from_slice(&slot.start.to_be_bytes());
+        body.extend_from_slice(&slot.offset.to_be_bytes());
+        body.extend_from_slice(&slot.stored.to_be_bytes());
+        body.extend_from_slice(&slot.raw.to_be_bytes());
+        body.push(slot.codec);
+    }
+    let raw = u32::try_from(body.len())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "index over 4 GiB"))?;
+    encode_stored(KIND_INDEX, CODEC_RAW, "", &body, raw)
+}
+
+/// Takes the live table from a v2 pack's index record when its digest
+/// holds, every slot lies inside the covered region and the covered region
+/// lies inside the file; `valid_len` then moves to the end of that region.
+/// A missing or unusable index leaves `inner` as it was, and the scan reads
+/// every record.
+fn read_index(inner: &mut Inner, file_len: u64) -> io::Result<()> {
+    let at = inner.valid_len;
+    let mut head = [0u8; HEAD_LEN];
+    inner.file.seek(SeekFrom::Start(at))?;
+    if inner.file.read_exact(&mut head).is_err() || head[0] != KIND_INDEX || head[1] != CODEC_RAW
+    {
+        return Ok(());
+    }
+    let path_len = u16::from_be_bytes([head[2], head[3]]) as usize;
+    let stored_len = u32::from_be_bytes([head[4], head[5], head[6], head[7]]) as usize;
+    let end = at + (HEAD_LEN + path_len + stored_len + DIGEST_LEN) as u64;
+    if path_len != 0 || end > file_len {
+        return Ok(());
+    }
+    let mut record = head.to_vec();
+    record.resize(HEAD_LEN + stored_len + DIGEST_LEN, 0);
+    inner.file.read_exact(&mut record[HEAD_LEN..])?;
+    let (framed, digest) = record.split_at(HEAD_LEN + stored_len);
+    if Sha256::digest(framed).as_slice() != digest {
+        return Ok(());
+    }
+    let body = &framed[HEAD_LEN..];
+    let Some(table) = parse_index(body, end) else {
+        return Ok(());
+    };
+    let (covered, slots) = table;
+    if covered > file_len {
+        return Ok(());
+    }
+    let mut live = BTreeMap::new();
+    let mut live_bytes = PACK_MAGIC.len() as u64 + index_len(0, 0);
+    for (path, slot) in slots {
+        live_bytes += live_cost(&path, &slot);
+        live.insert(path, slot);
+    }
+    inner.live = live;
+    inner.live_bytes = live_bytes;
+    inner.valid_len = covered;
+    Ok(())
+}
+
+/// The covered length and the slots of an index body, or `None` when the
+/// body is malformed or a slot does not lie between `first` and the covered
+/// length.
+fn parse_index(body: &[u8], first: u64) -> Option<(u64, Vec<(String, Slot)>)> {
+    let covered = u64::from_be_bytes(body.get(..8)?.try_into().ok()?);
+    let n = u32::from_be_bytes(body.get(8..12)?.try_into().ok()?) as usize;
+    if covered < first || n > body.len() / INDEX_PER_PATH {
+        return None;
+    }
+    let mut at = INDEX_FIXED;
+    let mut slots = Vec::with_capacity(n);
+    for _ in 0..n {
+        let len = u16::from_be_bytes(body.get(at..at + 2)?.try_into().ok()?) as usize;
+        at += 2;
+        let path = std::str::from_utf8(body.get(at..at + len)?).ok()?.to_string();
+        at += len;
+        let row = body.get(at..at + INDEX_PER_PATH - 2)?;
+        at += INDEX_PER_PATH - 2;
+        let slot = Slot {
+            start: u64::from_be_bytes(row[..8].try_into().ok()?),
+            offset: u64::from_be_bytes(row[8..16].try_into().ok()?),
+            stored: u32::from_be_bytes(row[16..20].try_into().ok()?),
+            raw: u32::from_be_bytes(row[20..24].try_into().ok()?),
+            codec: row[24],
+        };
+        let stop = slot
+            .offset
+            .checked_add(u64::from(slot.stored) + DIGEST_LEN as u64)?;
+        if slot.start < first || slot.offset < slot.start + HEAD_LEN as u64 || stop > covered {
+            return None;
+        }
+        slots.push((path, slot));
+    }
+    (at == body.len()).then_some((covered, slots))
 }
 
 /// Reads records from `valid_len` to the end of the file one at a time,
@@ -571,6 +740,7 @@ fn scan(inner: &mut Inner) -> io::Result<()> {
             break;
         };
         let slot = Slot {
+            start: at,
             offset: at + (HEAD_LEN + path_len) as u64,
             stored: stored_len as u32,
             raw,
@@ -590,10 +760,155 @@ fn scan(inner: &mut Inner) -> io::Result<()> {
                     record_live(inner, &to, moved);
                 }
             }
+            // An index carries no change of its own; when it was not usable
+            // the records it describes follow it and are applied here.
+            KIND_INDEX => {}
             _ => break,
         }
         at += (HEAD_LEN + path_len + stored_len + DIGEST_LEN) as u64;
     }
     inner.valid_len = at;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body(i: usize) -> Vec<u8> {
+        format!("{{\"module\":\"PETSc/3.24.{i}-foss-2026.1\",\"pad\":\"{}\"}}", "x".repeat(200))
+            .into_bytes()
+    }
+
+    fn fill(store: &PackStore, n: usize) {
+        for i in 0..n {
+            store.put(&format!("tile/entries/{i:03}"), &body(i)).unwrap();
+        }
+        store.put("tile/entries/000", b"rewritten").unwrap();
+        store.delete("tile/entries/001").unwrap();
+        store.rename("tile/entries/002", "moved/two").unwrap();
+    }
+
+    fn check(store: &PackStore, n: usize) {
+        assert_eq!(store.get("tile/entries/000").unwrap().as_deref(), Some(&b"rewritten"[..]));
+        assert_eq!(store.get("tile/entries/001").unwrap(), None);
+        assert_eq!(store.get("tile/entries/002").unwrap(), None);
+        assert_eq!(store.get("moved/two").unwrap(), Some(body(2)));
+        for i in 3..n {
+            assert_eq!(store.get(&format!("tile/entries/{i:03}")).unwrap(), Some(body(i)));
+        }
+    }
+
+    #[test]
+    fn a_compacted_pack_opens_through_its_index_and_takes_later_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        let store = PackStore::open(&pack).unwrap();
+        fill(&store, 50);
+        let live = store.live_bytes().unwrap();
+        let done = store.compact().unwrap();
+        assert_eq!(done.after, live);
+        store.put("after/compaction", b"tail").unwrap();
+        store.rename("tile/entries/003", "moved/three").unwrap();
+        drop(store);
+        let reader = PackStore::open_read(&pack).unwrap();
+        {
+            let inner = reader.inner.lock().unwrap();
+            assert_eq!(inner.valid_len, std::fs::metadata(&pack).unwrap().len());
+        }
+        assert_eq!(reader.get("after/compaction").unwrap().as_deref(), Some(&b"tail"[..]));
+        assert_eq!(reader.get("moved/three").unwrap(), Some(body(3)));
+        assert_eq!(reader.get("tile/entries/003").unwrap(), None);
+        assert_eq!(reader.get("moved/two").unwrap(), Some(body(2)));
+        assert_eq!(reader.get("tile/entries/049").unwrap(), Some(body(49)));
+        let writer = PackStore::open(&pack).unwrap();
+        let live = writer.live_bytes().unwrap();
+        assert_eq!(writer.compact().unwrap().after, live);
+        assert_eq!(writer.get("moved/three").unwrap(), Some(body(3)));
+    }
+
+    #[test]
+    fn the_index_is_what_open_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        let store = PackStore::open(&pack).unwrap();
+        fill(&store, 20);
+        store.compact().unwrap();
+        drop(store);
+        let mut file = OpenOptions::new().read(true).open(&pack).unwrap();
+        let mut inner = Inner {
+            file: file.try_clone().unwrap(),
+            valid_len: PACK_MAGIC.len() as u64,
+            live: BTreeMap::new(),
+            live_bytes: 0,
+            #[cfg(unix)]
+            inode: 0,
+        };
+        let len = file.seek(SeekFrom::End(0)).unwrap();
+        read_index(&mut inner, len).unwrap();
+        assert_eq!(inner.valid_len, len);
+        assert_eq!(inner.live.len(), 19);
+    }
+
+    #[test]
+    fn a_damaged_index_falls_back_to_reading_every_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        let store = PackStore::open(&pack).unwrap();
+        fill(&store, 30);
+        store.compact().unwrap();
+        drop(store);
+        let mut bytes = std::fs::read(&pack).unwrap();
+        // A byte inside the index body; its digest no longer holds.
+        bytes[PACK_MAGIC.len() + HEAD_LEN + 3] ^= 0xff;
+        std::fs::write(&pack, &bytes).unwrap();
+        let reader = PackStore::open_read(&pack).unwrap();
+        check(&reader, 30);
+        let writer = PackStore::open(&pack).unwrap();
+        assert_eq!(std::fs::metadata(&pack).unwrap().len(), bytes.len() as u64);
+        check(&writer, 30);
+    }
+
+    #[test]
+    fn a_damaged_record_behind_the_index_is_refused_when_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        let store = PackStore::open(&pack).unwrap();
+        fill(&store, 10);
+        store.compact().unwrap();
+        let slot = store.inner.lock().unwrap().live["tile/entries/005"];
+        drop(store);
+        let mut bytes = std::fs::read(&pack).unwrap();
+        bytes[slot.offset as usize] ^= 0xff;
+        std::fs::write(&pack, &bytes).unwrap();
+        let reader = PackStore::open_read(&pack).unwrap();
+        let err = reader.get("tile/entries/005").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(reader.get("tile/entries/006").unwrap(), Some(body(6)));
+    }
+
+    #[test]
+    fn a_v1_pack_opens_and_becomes_v2_at_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = dir.path().join("pack");
+        let mut bytes = PACK_MAGIC_V1.to_vec();
+        for i in 0..5 {
+            let raw = body(i);
+            bytes.extend(encode_stored(KIND_PUT, CODEC_RAW, &format!("p/{i}"), &raw, raw.len() as u32).unwrap());
+        }
+        std::fs::write(&pack, &bytes).unwrap();
+        let store = PackStore::open(&pack).unwrap();
+        for i in 0..5 {
+            assert_eq!(store.get(&format!("p/{i}")).unwrap(), Some(body(i)));
+        }
+        store.put("p/5", &body(5)).unwrap();
+        assert!(std::fs::read(&pack).unwrap().starts_with(PACK_MAGIC_V1));
+        store.compact().unwrap();
+        assert!(std::fs::read(&pack).unwrap().starts_with(PACK_MAGIC));
+        drop(store);
+        let reader = PackStore::open_read(&pack).unwrap();
+        for i in 0..6 {
+            assert_eq!(reader.get(&format!("p/{i}")).unwrap(), Some(body(i)));
+        }
+    }
 }
