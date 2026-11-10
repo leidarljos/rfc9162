@@ -5,6 +5,24 @@ The crates carry the one workspace version and are released together.
 
 <!-- towncrier release notes start -->
 
+## 0.10.0 (2026-11-09)
+
+### Features
+
+- `rfc9162-log`: index runs are written in run format v2, which front-codes each key against the one before it and stores each log index as a varint offset from the run's first entry; a run of 100000 entries takes about half the bytes of v1. v1 runs stay readable.
+- `rfc9162-log`: index runs are written in run format v3, sorted pairs in front-coded blocks of 64 behind a block index of first keys, so a lookup decodes only the blocks that can hold its key instead of the whole run. At 1000000 entries `Index::find` takes about 130 µs at p50 against about 1 ms for a scan of the store. v1 and v2 runs stay readable.
+- `rfc9162-tiles`: `PackStore::open_shared` and `open_shared_waiting` open a writer that takes the pack lock for each change instead of for its lifetime, so several processes can write one pack. Under the lock the writer reads what others appended, reopens after another's compaction and truncates a torn tail before applying its change.
+- `rfc9162-tiles`: a compaction writes the pack's live table as its first record, so opening a compacted pack reads that index and the records after it rather than every record. A pack in the v1 layout opens by scanning and takes the index at its next compaction.
+
+### Fixes
+
+- `rfc9162-tiles`: an index record whose digest or bounds do not hold is stepped over and the pack is scanned, rather than read as a torn tail; a rename read by the scan gives back the bytes `live_bytes` had counted for the path.
+
+### Documentation
+
+- The top README shows the sidecar workflow: init, sync, snapshot, history and diff from a shell, one signed file beside the tree, and nesting a stack's checkpoint under a site's.
+
+
 ## 0.9.0 (2026-11-08)
 
 ### Features
