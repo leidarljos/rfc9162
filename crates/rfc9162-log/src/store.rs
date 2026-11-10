@@ -51,8 +51,15 @@ use crate::{AuthenticatedLog, Compaction, Error, Inclusion, Located, Recovery, R
 
 /// First bytes of a logged run manifest.
 pub const MANIFEST_MAGIC: &[u8] = b"rfc9162-log/manifest/v2\n";
-/// First bytes of a run file as the writer writes it (format v2).
+/// First bytes of a run file in format v2 (front-coded, one sequence),
+/// which readers accept.
 pub const RUN_MAGIC: &[u8] = b"rfc9162-log/run/v2\n";
+/// First bytes of a run file as the writer writes it (format v3: front-coded
+/// blocks of [`BLOCK_PAIRS`] pairs behind a block index).
+pub const RUN_MAGIC_V3: &[u8] = b"rfc9162-log/run/v3\n";
+/// Pairs per block in a v3 run. Each block restarts its front coding, so a
+/// lookup decodes only the blocks whose key range can hold the key.
+pub const BLOCK_PAIRS: usize = 64;
 /// First bytes of a run file in format v1, which readers still accept.
 pub const RUN_MAGIC_V1: &[u8] = b"rfc9162-log/run/v1\n";
 const LIVE: &str = "runs/live";
@@ -242,13 +249,197 @@ impl Logged {
     }
 }
 
-/// A run file, decoded and checked against its manifest.
+/// A run file, checked against its manifest. Runs in format v1 and v2 are
+/// decoded whole into `pairs`; a v3 run keeps its bytes and its block index
+/// in `blocks` and decodes a block when a lookup reaches it.
 pub struct Run {
     pairs: Vec<(Vec<u8>, u64)>,
+    blocks: Option<Blocks>,
     filter: Bloom,
 }
 
+/// The block index and body of a v3 run.
+struct Blocks {
+    lo: u64,
+    hi: u64,
+    body: Vec<u8>,
+    index: Vec<BlockRef>,
+}
+
+/// One block: its first key and where its bytes sit in the body.
+struct BlockRef {
+    first: Vec<u8>,
+    start: usize,
+    end: usize,
+    count: usize,
+}
+
+impl Blocks {
+    /// The pairs of block `b`, checked: the first key matches the index, the
+    /// pairs rise strictly and every index lies in the run's entry range.
+    fn decode(&self, b: usize) -> Result<Vec<(Vec<u8>, u64)>, Error> {
+        let what = "run block";
+        let block = &self.index[b];
+        let mut c = Cursor {
+            bytes: &self.body[block.start..block.end],
+            at: 0,
+            what,
+        };
+        let mut pairs: Vec<(Vec<u8>, u64)> = Vec::with_capacity(block.count);
+        for _ in 0..block.count {
+            let shared = c.varint()?;
+            let unshared = c.varint()?;
+            let previous = pairs.last().map(|(k, _)| k.as_slice()).unwrap_or(&[]);
+            if shared > previous.len() as u64 || shared.saturating_add(unshared) > u64::from(u16::MAX) {
+                return Err(Error::Tampered { what });
+            }
+            let mut key = previous[..shared as usize].to_vec();
+            key.extend_from_slice(c.take(unshared as usize)?);
+            let index = self.lo.checked_add(c.varint()?).ok_or(Error::Tampered { what })?;
+            if index > self.hi {
+                return Err(Error::Tampered { what });
+            }
+            if let Some(last) = pairs.last() {
+                if (&key, index) <= (&last.0, last.1) {
+                    return Err(Error::Tampered { what });
+                }
+            }
+            pairs.push((key, index));
+        }
+        c.done()?;
+        match pairs.first() {
+            Some((key, _)) if *key == block.first => Ok(pairs),
+            _ => Err(Error::Tampered { what }),
+        }
+    }
+
+    /// Blocks that can hold keys from `lo` on: from the last block whose first
+    /// key is below `lo` (the key may start inside it), in order.
+    fn from(&self, lo: &[u8]) -> usize {
+        self.index
+            .partition_point(|b| b.first.as_slice() < lo)
+            .saturating_sub(1)
+    }
+}
+
 impl Run {
+    /// A v3 run: the pairs in blocks of [`BLOCK_PAIRS`], each front-coded from
+    /// an empty key, behind an index of each block's first key, pair count and
+    /// byte length.
+    fn encode_blocks(entries: &RangeInclusive<u64>, pairs: &[(Vec<u8>, u64)]) -> Result<Vec<u8>, Error> {
+        let lo = *entries.start();
+        let mut bodies: Vec<Vec<u8>> = Vec::new();
+        for chunk in pairs.chunks(BLOCK_PAIRS) {
+            let mut body = Vec::new();
+            let mut previous: &[u8] = &[];
+            for (key, index) in chunk {
+                if key.len() > usize::from(u16::MAX) {
+                    return Err(Error::Tree("key over 65535 bytes"));
+                }
+                let offset = index
+                    .checked_sub(lo)
+                    .ok_or(Error::Tree("a run pair below the run's entry range"))?;
+                let shared = shared_prefix(previous, key);
+                put_varint(&mut body, shared as u64);
+                put_varint(&mut body, (key.len() - shared) as u64);
+                body.extend_from_slice(&key[shared..]);
+                put_varint(&mut body, offset);
+                previous = key;
+            }
+            bodies.push(body);
+        }
+        let mut out = RUN_MAGIC_V3.to_vec();
+        put_u64(&mut out, lo);
+        put_u64(&mut out, *entries.end());
+        put_varint(&mut out, pairs.len() as u64);
+        put_varint(&mut out, bodies.len() as u64);
+        for (chunk, body) in pairs.chunks(BLOCK_PAIRS).zip(&bodies) {
+            let first = &chunk[0].0;
+            put_varint(&mut out, first.len() as u64);
+            out.extend_from_slice(first);
+            put_varint(&mut out, chunk.len() as u64);
+            put_varint(&mut out, body.len() as u64);
+        }
+        for body in &bodies {
+            out.extend_from_slice(body);
+        }
+        let keys: Vec<&[u8]> = pairs.iter().map(|(k, _)| k.as_slice()).collect();
+        let filter = Bloom::build(&keys, BITS_PER_KEY).to_bytes();
+        put_varint(&mut out, filter.len() as u64);
+        out.extend_from_slice(&filter);
+        Ok(out)
+    }
+
+    /// Reads a v3 run's header, block index and filter; blocks stay encoded.
+    fn decode_blocks(body: &[u8], expect: &RunManifest) -> Result<Self, Error> {
+        let what = "run file";
+        let mut c = Cursor { bytes: body, at: 0, what };
+        let lo = c.u64()?;
+        let hi = c.u64()?;
+        if lo != *expect.entries.start() || hi != *expect.entries.end() {
+            return Err(Error::Tampered { what });
+        }
+        let n = c.varint()?;
+        let nblocks = c.varint()?;
+        if n > (body.len() as u64) / 3 || nblocks > n.max(1) {
+            return Err(Error::Tampered { what });
+        }
+        let mut heads = Vec::with_capacity(nblocks as usize);
+        let mut total = 0u64;
+        for _ in 0..nblocks {
+            let len = c.varint()?;
+            if len > u64::from(u16::MAX) {
+                return Err(Error::Tampered { what });
+            }
+            let first = c.take(len as usize)?.to_vec();
+            let count = c.varint()?;
+            let bytes = c.varint()?;
+            if count == 0 || count > BLOCK_PAIRS as u64 || bytes == 0 {
+                return Err(Error::Tampered { what });
+            }
+            if let Some((previous, _, _)) = heads.last() {
+                if first < *previous {
+                    return Err(Error::Tampered { what });
+                }
+            }
+            total += count;
+            heads.push((first, count as usize, bytes as usize));
+        }
+        if total != n {
+            return Err(Error::Tampered { what });
+        }
+        let mut index = Vec::with_capacity(heads.len());
+        let mut start = 0usize;
+        let mut blob = Vec::new();
+        for (first, count, bytes) in heads {
+            blob.extend_from_slice(c.take(bytes)?);
+            index.push(BlockRef { first, start, end: start + bytes, count });
+            start += bytes;
+        }
+        let len = usize::try_from(c.varint()?).map_err(|_| Error::Tampered { what })?;
+        let filter = Bloom::from_bytes(c.take(len)?).map_err(|_| Error::Tampered { what })?;
+        c.done()?;
+        Ok(Self {
+            pairs: Vec::new(),
+            blocks: Some(Blocks { lo, hi, body: blob, index }),
+            filter,
+        })
+    }
+
+    /// Every pair of the run, in order.
+    fn all_pairs(&self) -> Result<Vec<(Vec<u8>, u64)>, Error> {
+        match &self.blocks {
+            None => Ok(self.pairs.clone()),
+            Some(blocks) => {
+                let mut out = Vec::new();
+                for b in 0..blocks.index.len() {
+                    out.extend(blocks.decode(b)?);
+                }
+                Ok(out)
+            }
+        }
+    }
+
     fn encode(entries: &RangeInclusive<u64>, pairs: &[(Vec<u8>, u64)]) -> Result<Vec<u8>, Error> {
         let lo = *entries.start();
         let mut out = RUN_MAGIC.to_vec();
@@ -303,6 +494,9 @@ impl Run {
         let what = "run file";
         if identity(bytes) != expect.run_hash {
             return Err(Error::Tampered { what });
+        }
+        if let Some(body) = bytes.strip_prefix(RUN_MAGIC_V3) {
+            return Self::decode_blocks(body, expect);
         }
         let (v2, body) = if let Some(body) = bytes.strip_prefix(RUN_MAGIC) {
             (true, body)
@@ -360,30 +554,54 @@ impl Run {
         let len = usize::try_from(len).map_err(|_| Error::Tampered { what })?;
         let filter = Bloom::from_bytes(c.take(len)?).map_err(|_| Error::Tampered { what })?;
         c.done()?;
-        Ok(Self { pairs, filter })
+        Ok(Self {
+            pairs,
+            blocks: None,
+            filter,
+        })
     }
 
+    /// The entry indices recorded for `key`, as the unit tests read them.
+    #[cfg(test)]
     fn indices_of(&self, key: &[u8]) -> Vec<u64> {
-        if !self.filter.contains(key) {
-            return Vec::new();
-        }
-        let start = self.pairs.partition_point(|(k, _)| k.as_slice() < key);
-        self.pairs[start..]
-            .iter()
-            .take_while(|(k, _)| k.as_slice() == key)
-            .map(|(_, i)| *i)
-            .collect()
+        self.lookup(key).expect("a checked run")
     }
 
-    fn pairs_in(&self, range: &RangeInclusive<&[u8]>) -> Vec<(Vec<u8>, u64)> {
-        let start = self
-            .pairs
-            .partition_point(|(k, _)| k.as_slice() < *range.start());
-        self.pairs[start..]
-            .iter()
-            .take_while(|(k, _)| k.as_slice() <= *range.end())
-            .cloned()
-            .collect()
+    fn lookup(&self, key: &[u8]) -> Result<Vec<u64>, Error> {
+        if !self.filter.contains(key) {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .pairs_in(&(key..=key))?
+            .into_iter()
+            .map(|(_, i)| i)
+            .collect())
+    }
+
+    fn pairs_in(&self, range: &RangeInclusive<&[u8]>) -> Result<Vec<(Vec<u8>, u64)>, Error> {
+        let Some(blocks) = &self.blocks else {
+            let start = self
+                .pairs
+                .partition_point(|(k, _)| k.as_slice() < *range.start());
+            return Ok(self.pairs[start..]
+                .iter()
+                .take_while(|(k, _)| k.as_slice() <= *range.end())
+                .cloned()
+                .collect());
+        };
+        let mut out = Vec::new();
+        for b in blocks.from(range.start())..blocks.index.len() {
+            if blocks.index[b].first.as_slice() > *range.end() {
+                break;
+            }
+            out.extend(
+                blocks
+                    .decode(b)?
+                    .into_iter()
+                    .filter(|(k, _)| range.contains(&k.as_slice())),
+            );
+        }
+        Ok(out)
     }
 }
 
@@ -657,7 +875,7 @@ impl<S: TileStore> Index<S> {
             if key < run.key_lo.as_slice() || key > run.key_hi.as_slice() {
                 continue;
             }
-            for index in self.run(run)?.indices_of(key) {
+            for index in self.run(run)?.lookup(key)? {
                 found.push(self.located(index, Some(run))?);
             }
         }
@@ -678,7 +896,7 @@ impl<S: TileStore> Index<S> {
             if run.key_hi.as_slice() < *range.start() || run.key_lo.as_slice() > *range.end() {
                 continue;
             }
-            for (k, index) in self.run(run)?.pairs_in(&range) {
+            for (k, index) in self.run(run)?.pairs_in(&range)? {
                 hits.push((k, index, Some(n)));
             }
         }
@@ -852,7 +1070,7 @@ impl<S: TileStore> Store<S> {
         pairs: Vec<(Vec<u8>, u64)>,
         replaced: Vec<u64>,
     ) -> Result<RunManifest, Error> {
-        let bytes = Run::encode(&entries, &pairs)?;
+        let bytes = Run::encode_blocks(&entries, &pairs)?;
         let path = run_path(&entries);
         if !self.manifest_store().create_new(&path, &bytes)? {
             return Err(Error::Tree("a run for that entry range is already stored"));
@@ -930,7 +1148,7 @@ impl<S: TileStore> AuthenticatedLog for Store<S> {
         let mut merged: BTreeSet<(Vec<u8>, u64)> = BTreeSet::new();
         let mut replaced = Vec::new();
         for run in &self.live {
-            merged.extend(index.run(run)?.pairs.iter().cloned());
+            merged.extend(index.run(run)?.all_pairs()?);
             replaced.push(
                 run.manifest_index
                     .ok_or(Error::Tree("live run without a manifest index"))?,
@@ -1115,5 +1333,138 @@ mod tests {
             what: "test",
         };
         assert_eq!(c.varint().unwrap(), u64::MAX);
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    fn manifest(entries: RangeInclusive<u64>, bytes: &[u8]) -> RunManifest {
+        RunManifest {
+            entries,
+            key_lo: Vec::new(),
+            key_hi: Vec::new(),
+            run_hash: identity(bytes),
+            manifest_index: None,
+        }
+    }
+
+    /// 1000 entries; "module=hot" recurs 300 times so it spans several blocks.
+    fn pairs() -> Vec<(Vec<u8>, u64)> {
+        let mut pairs: Vec<(Vec<u8>, u64)> = (0u64..1000)
+            .flat_map(|i| {
+                let module = if i % 3 == 0 && i < 900 {
+                    "module=hot".to_string()
+                } else {
+                    format!("module=m{i:04}")
+                };
+                [
+                    (module.into_bytes(), i),
+                    (format!("target=t{}", i % 4).into_bytes(), i),
+                ]
+            })
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    fn v3(pairs: &[(Vec<u8>, u64)]) -> Run {
+        let bytes = Run::encode_blocks(&(0..=999), pairs).unwrap();
+        assert!(bytes.starts_with(RUN_MAGIC_V3));
+        Run::decode(&bytes, &manifest(0..=999, &bytes)).unwrap()
+    }
+
+    fn brute(pairs: &[(Vec<u8>, u64)], lo: &[u8], hi: &[u8]) -> Vec<(Vec<u8>, u64)> {
+        pairs
+            .iter()
+            .filter(|(k, _)| k.as_slice() >= lo && k.as_slice() <= hi)
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn v3_keeps_blocks_encoded_and_returns_every_pair() {
+        let pairs = pairs();
+        let run = v3(&pairs);
+        let blocks = run.blocks.as_ref().unwrap();
+        assert_eq!(blocks.index.len(), pairs.len().div_ceil(BLOCK_PAIRS));
+        assert!(run.pairs.is_empty());
+        assert_eq!(run.all_pairs().unwrap(), pairs);
+    }
+
+    #[test]
+    fn a_key_spanning_blocks_is_found_in_full() {
+        let pairs = pairs();
+        let run = v3(&pairs);
+        let expect: Vec<u64> = brute(&pairs, b"module=hot", b"module=hot")
+            .into_iter()
+            .map(|(_, i)| i)
+            .collect();
+        assert_eq!(expect.len(), 300);
+        assert_eq!(run.lookup(b"module=hot").unwrap(), expect);
+        assert!(run.lookup(b"module=absent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn ranges_match_a_scan_of_the_pairs() {
+        let pairs = pairs();
+        let run = v3(&pairs);
+        for (lo, hi) in [
+            (&b"module=m0100"[..], &b"module=m0200"[..]),
+            (b"module=", b"module=\xff"),
+            (b"target=t1", b"target=t2"),
+            (b"a", b"z"),
+            (b"zz", b"zzz"),
+        ] {
+            assert_eq!(run.pairs_in(&(lo..=hi)).unwrap(), brute(&pairs, lo, hi));
+        }
+    }
+
+    #[test]
+    fn a_lookup_decodes_only_the_blocks_it_needs() {
+        let pairs = pairs();
+        let run = v3(&pairs);
+        let blocks = run.blocks.as_ref().unwrap();
+        let first = blocks.from(b"target=t3");
+        let last = blocks
+            .index
+            .partition_point(|b| b.first.as_slice() <= &b"target=t3"[..]);
+        assert!(last - first < blocks.index.len() / 4, "{first}..{last}");
+    }
+
+    #[test]
+    fn v2_and_v3_answer_alike() {
+        let pairs = pairs();
+        let bytes = Run::encode(&(0..=999), &pairs).unwrap();
+        let old = Run::decode(&bytes, &manifest(0..=999, &bytes)).unwrap();
+        let new = v3(&pairs);
+        for key in [&b"module=hot"[..], b"module=m0001", b"target=t0", b"nope"] {
+            assert_eq!(old.lookup(key).unwrap(), new.lookup(key).unwrap());
+        }
+    }
+
+    #[test]
+    fn a_tampered_block_is_refused_when_read() {
+        let pairs = pairs();
+        let bytes = Run::encode_blocks(&(0..=999), &pairs).unwrap();
+        let run = Run::decode(&bytes, &manifest(0..=999, &bytes)).unwrap();
+        let mut blocks = run.blocks.unwrap();
+        let b = blocks.index.len() / 2;
+        let at = blocks.index[b].start;
+        blocks.body[at] = 0x7f;
+        assert!(matches!(blocks.decode(b), Err(Error::Tampered { .. })));
+    }
+
+    #[test]
+    fn a_count_that_disagrees_with_the_blocks_is_refused() {
+        let pairs = pairs();
+        let mut bytes = Run::encode_blocks(&(0..=999), &pairs).unwrap();
+        // n sits right after magic, lo and hi; 2000 pairs encode as 0xd0 0x0f.
+        let at = RUN_MAGIC_V3.len() + 16;
+        assert_eq!(&bytes[at..at + 2], &[0xd0, 0x0f]);
+        bytes[at] = 0xcf;
+        let expect = manifest(0..=999, &bytes);
+        assert!(matches!(Run::decode(&bytes, &expect), Err(Error::Tampered { .. })));
     }
 }
