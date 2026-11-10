@@ -1,60 +1,23 @@
 # rfc9162-log
 
-The contract for the log that grows out of `rfc9162` and `rfc9162-tiles`,
-written before its store so the store is argued over types.
+An authenticated, indexed, append-only log over [`rfc9162`](https://docs.rs/rfc9162) and [`rfc9162-tiles`](https://docs.rs/rfc9162-tiles). Keys are sorted into runs. Each run's manifest is itself a log entry, so a checkpoint over the log covers the index. A lookup returns the entry and the run that found it, each with an inclusion path at one tree size. Compaction appends a new run and leaves the replaced runs in the log.
 
-What `rfc9162-tiles` gives: tlog-tiles layout, per-bundle key sidecars the
-checkpoint does not sign, `find` by Bloom filter and scan, torn-tail
-quarantine. What this crate names on top:
+[`Sidecar`](https://docs.rs/rfc9162-log/latest/rfc9162_log/struct.Sidecar.html) keeps a directory's history in that log: file bytes are stored once under their SHA-256, and each change is a JSON entry. `rfc9162-sidecar` (`cargo install rfc9162-log`) is the same operations on `DIR/.sidecar/pack`.
 
-| guarantee | type |
-|---|---|
-| the checkpoint signs the index | `RunManifest::manifest_index`: every sealed run's manifest is a log entry |
-| a lookup carries its own proof | `Located`: the entry and the run that found it, each with an inclusion path at one tree size |
-| prefix and range queries seek | `RunManifest::key_lo` and `key_hi` over sorted runs; `AuthenticatedLog::range` |
-| compaction keeps every proof | `Compaction`: replaced runs stay in the log, the written run is logged |
-| recovery is proven | `Recovery`: replay past the checkpoint, consistency path back to it |
-
-Consumers: eb-stack's install ledger (keys such as `module=`, `pkg=`,
-`target=`), deedar's deed log, and ljos through deedar; one log per site for
-HPC installs, general enough to carry an SBOM.
-
-`publish = false` until the store exists. The design discussion lives on the
-owner's tracker beside this repository.
-
-## A sidecar beside a project tree
-
-`Sidecar` keeps a project's history the way `.git` keeps a working tree's
-and etckeeper keeps `/etc`'s, as an authenticated log: `put(path, bytes,
-meta)` stores the bytes once per content hash at `blob/<sha256>` and
-appends one JSON entry (`{"sidecar":1,"op":"put","path":...,"blob":...,
-"size":...,"meta":{...}}`); `delete(path, meta)` appends the deletion.
-`history(path)` is a point lookup with proofs, `under(dir)` a range over the
-sorted runs, `tree_at(size)` the paths a snapshot holds, `diff(from, to)`
-the changes between two, `sync_dir(root, skip, meta)` records a directory
-against the tree in one batch, and `snapshot(signer, origin)` seals the
-tail into a run and signs the log. Projects nest: `include_checkpoint(path,
-note, trusted, meta)` logs a child's signed checkpoint under a path, so a
-site's log signs each stack's and a stack's each install's. A third party
-proves any change from the checkpoint alone. Over a `PackStore` the sidecar is one file and its lock.
+The repository guide has the [library tasks and a command transcript](../../docs/src/howto/rfc9162-log.md), the [run format](../../docs/src/topics/runs.md) and the [command reference](../../docs/src/reference/sidecar.md).
 
 ```rust
-let store = rfc9162_tiles::PackStore::open(project.join(".sidecar/pack"))?;
-let mut sidecar = rfc9162_log::Sidecar::open(&store)?;
-sidecar.put("modules/PETSc/3.25.0.lua", &lua, meta)?;
-let note = sidecar.snapshot(&signer, "example.org/site/stack-2026")?;
+use std::sync::Arc;
+
+use rfc9162_log::{AuthenticatedLog, Store};
+use rfc9162_tiles::MemoryStore;
+
+let mut log = Store::open(MemoryStore::new(), Arc::new(|_| Vec::new()))?;
+let index = log.append(b"alpha")?;
+log.seal()?;
+let found = log.find(&rfc9162_tiles::index::identity(b"alpha"))?;
+assert_eq!(found[0].entry.index, index);
+# Ok::<(), rfc9162_log::Error>(())
 ```
 
-From a shell, `rfc9162-sidecar` (`cargo install rfc9162-log`) runs the same
-over `DIR/.sidecar/pack`:
-
-```
-rfc9162-sidecar init     --dir /etc
-rfc9162-sidecar sync     --dir /etc --meta actor=root
-rfc9162-sidecar snapshot --dir /etc --key /root/keys/etc.pem --origin example.org/etc
-rfc9162-sidecar history  --dir /etc ssh/sshd_config
-rfc9162-sidecar tree     --dir /etc [SIZE]
-rfc9162-sidecar diff     --dir /etc FROM TO
-rfc9162-sidecar blob     --dir /etc HEX [--out FILE]
-rfc9162-sidecar include  --dir /site stacks/2026 --note head.txt --trusted "KEYLINE"
-```
+MIT.

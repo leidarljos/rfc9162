@@ -4,6 +4,7 @@ members = [
     "crates/rfc9162",
     "crates/rfc9162-tiles",
     "crates/rfc9162-log",
+    "docs/examples",
 ]
 
 [workspace.package]

@@ -1,0 +1,51 @@
+$ rfc9162-sidecar init --dir demo
+sidecar at demo/.sidecar size 0
+
+$ rfc9162-sidecar sync --dir demo --meta actor=root
+added motd
+added ssh/sshd_config
+synced: 2 added, 0 changed, 0 deleted, 0 unchanged; entries 0..2; size 2
+
+$ rfc9162-sidecar snapshot --dir demo --key demo.pem --origin example.org/demo
+snapshot example.org/demo size 3 root 4bc522505fc7ad765e208f1d45c73fb8ddfc3a9225ab3d0e1e5e8e78b8986a92
+
+$ rfc9162-sidecar sync --dir demo --meta actor=root
+added issue
+changed ssh/sshd_config
+deleted motd
+synced: 1 added, 1 changed, 1 deleted, 0 unchanged; entries 3..6; size 6
+
+$ rfc9162-sidecar history --dir demo ssh/sshd_config
+1	put	ssh/sshd_config	e807422bad84e7926a98fb262153b3d9c84244080e69b0e5d20446c183ffafc4	8
+4	put	ssh/sshd_config	bdc45620d3cbb299dd7f748340f858226752470f6ce378000a4f5485bf35070e	10
+
+$ rfc9162-sidecar tree --dir demo
+issue	3	7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c	4
+ssh/sshd_config	4	bdc45620d3cbb299dd7f748340f858226752470f6ce378000a4f5485bf35070e	10
+
+$ rfc9162-sidecar diff --dir demo 0 6
+0	put	motd	5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03	6
+1	put	ssh/sshd_config	e807422bad84e7926a98fb262153b3d9c84244080e69b0e5d20446c183ffafc4	8
+3	put	issue	7aa7a5359173d05b63cfd682e3c38487f3cb4f7f1d60659fe59fab1505977d4c	4
+4	put	ssh/sshd_config	bdc45620d3cbb299dd7f748340f858226752470f6ce378000a4f5485bf35070e	10
+5	delete	motd
+
+$ rfc9162-sidecar blob --dir demo bdc45620d3cbb299dd7f748340f858226752470f6ce378000a4f5485bf35070e
+Port 2222
+
+$ rfc9162-sidecar init --dir child
+sidecar at child/.sidecar size 0
+
+$ rfc9162-sidecar sync --dir child --meta actor=stack
+added modules/petsc.lua
+synced: 1 added, 0 changed, 0 deleted, 0 unchanged; entries 0..1; size 1
+
+$ rfc9162-sidecar snapshot --dir child --key child.pem --origin example.org/stack
+snapshot example.org/stack size 2 root 1fd49b5570bfe39c2697d7473081906f6999aae451743492d132c83705f340e3
+
+$ cargo run -q -p rfc9162-docs-examples --bin show_checkpoint -- child/.sidecar/pack > child-note.txt
+$ rfc9162-sidecar init --dir site
+sidecar at site/.sidecar size 0
+
+$ rfc9162-sidecar include --dir site stacks/2026 --note child-note.txt --trusted example.org/stack+77af48a1+AepKbGPinFIKvvVQexMuxfmVR3auvr57kkIe6mkURtIs --meta actor=site
+included stacks/2026 at 0

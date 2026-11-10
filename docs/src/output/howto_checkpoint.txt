@@ -1,0 +1,8 @@
+example.org/log
+2
+mDy1fATN3VJjTtqzinvvhXCKl08RS72aqexdTOZla0s=
+
+— example.org/log XizvALF5Epy36TLnS5yEwMRpxemNpzlbTZZc1scO6QbldBRA0HpqXVW46JhXROKwPoUDF91BIsSUWNnT17jheIyR3Ac=
+verified example.org/log
+cosignatures 1 timestamp 1700000000
+verifier example.org/log+5e2cef00+AepKbGPinFIKvvVQexMuxfmVR3auvr57kkIe6mkURtIs

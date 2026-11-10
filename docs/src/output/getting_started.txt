@@ -1,0 +1,8 @@
+size 3
+root 385da30f3917282c8939dff851957e519ab1846b1351a14c0adb3b11632742aa
+inclusion 0 alpha steps 2 ok true
+inclusion 1 beta steps 2 ok true
+inclusion 2 gamma steps 1 ok true
+later size 4 root 42fc54eeb6352f90cc81fdd5791292cca3974a168208b395b06a76240b24884d
+consistency 3 -> 4 steps 3 ok true
+material example.org/log	3	385da30f3917282c8939dff851957e519ab1846b1351a14c0adb3b11632742aa

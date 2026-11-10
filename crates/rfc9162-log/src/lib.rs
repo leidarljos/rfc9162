@@ -22,6 +22,28 @@
 //! to a path is an entry whose bytes are a content-addressed blob in the
 //! same store, a snapshot is a signed checkpoint, and over a
 //! [`rfc9162_tiles::PackStore`] the whole history is one file.
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use rfc9162_log::{AuthenticatedLog, Store};
+//! use rfc9162_tiles::MemoryStore;
+//!
+//! let mut log = Store::open(MemoryStore::new(), Arc::new(|_| Vec::new()))?;
+//! let index = log.append(b"alpha")?;
+//! log.seal()?;
+//! let found = log.find(&rfc9162_tiles::index::identity(b"alpha"))?;
+//! assert_eq!(found[0].entry.index, index);
+//! let bytes = log.index()?.reader().get(index)?.unwrap();
+//! assert!(rfc9162::verify_inclusion(
+//!     &rfc9162::leaf_hash(&bytes),
+//!     index as usize,
+//!     found[0].entry.tree_size as usize,
+//!     &found[0].entry.path,
+//!     &rfc9162::hex(&log.root()),
+//! ));
+//! # Ok::<(), rfc9162_log::Error>(())
+//! ```
 
 #![forbid(unsafe_code)]
 

@@ -8,6 +8,28 @@
 //! and `rfc9162::consistency_proof` give over the flat leaf slice. The head
 //! is a C2SP checkpoint, an Ed25519 signed note, with witness cosignatures
 //! checked as cosignature/v1.
+//!
+//! ```
+//! use rfc9162_tiles::index::no_keys;
+//! use rfc9162_tiles::{MemoryStore, Reader, Writer};
+//!
+//! let store = MemoryStore::new();
+//! let mut writer = Writer::open(store.clone(), no_keys())?;
+//! let index = writer.append(b"first record")?;
+//! drop(writer);
+//!
+//! let reader = Reader::open(store, no_keys())?;
+//! assert_eq!(reader.get(index)?, Some(b"first record".to_vec()));
+//! let proof = reader.inclusion(index)?.unwrap();
+//! assert!(rfc9162::verify_inclusion(
+//!     &rfc9162::leaf_hash(b"first record"),
+//!     index as usize,
+//!     reader.size() as usize,
+//!     &proof,
+//!     &rfc9162::hex(&reader.root()),
+//! ));
+//! # Ok::<(), rfc9162_tiles::Error>(())
+//! ```
 
 pub mod base64;
 pub mod bloom;

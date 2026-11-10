@@ -1,0 +1,5 @@
+size 2 root 4f55f619d9215235778b2b9f17d6f4915b16171214d152381293669764de722e
+get 1 = two
+pack bytes 889
+compact before 889 after 532 paths 3
+shared append 0

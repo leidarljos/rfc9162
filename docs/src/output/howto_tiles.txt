@@ -1,0 +1,10 @@
+appended 0 and 1
+size 2 root 7456f1d72b3956155ce6655bfcd08decca38ec102bc2dea97d4c1070e8dd625f
+get 0 = first record
+inclusion 1 true
+find identity of first record -> [0]
+find identity of absent -> []
+files
+  .state/treeState
+  tile/0/000.p/2
+  tile/entries/000.p/2

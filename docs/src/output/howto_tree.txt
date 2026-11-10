@@ -1,0 +1,9 @@
+right leaf true
+other leaf false
+other index false
+short path false
+other root false
+prefix true
+swapped sizes false
+from_hex true
+from_hex uppercase false

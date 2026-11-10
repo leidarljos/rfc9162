@@ -285,6 +285,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rfc9162-docs-examples"
+version = "0.0.0"
+dependencies = [
+ "ed25519-dalek",
+ "pkcs8",
+ "rfc9162",
+ "rfc9162-log",
+ "rfc9162-tiles",
+ "tempfile",
+]
+
+[[package]]
 name = "rfc9162-log"
 version = "0.10.0"
 dependencies = [

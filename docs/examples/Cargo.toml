@@ -1,0 +1,15 @@
+[package]
+name = "rfc9162-docs-examples"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Runnable examples for the rfc9162 documentation"
+
+[dependencies]
+rfc9162.workspace = true
+rfc9162-tiles.workspace = true
+rfc9162-log = { path = "../../crates/rfc9162-log" }
+ed25519-dalek.workspace = true
+pkcs8 = { version = "0.10", features = ["pem"] }
+tempfile.workspace = true

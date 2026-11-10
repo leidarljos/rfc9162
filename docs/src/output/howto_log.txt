@@ -1,0 +1,10 @@
+appended 0 and 1, size 2
+sealed 0..=1 manifest 2
+find module=petsc index 0 run true inclusion true
+find module=absent -> 0
+range module=o..=module=petsc indices 1 0
+second manifest 4
+compact replaced [2, 4] written 5
+find after compact inclusion true
+recover checkpoint 0 replayed 1 quarantined 0
+split data size 1 index size 1

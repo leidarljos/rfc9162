@@ -1,0 +1,25 @@
+[book]
+title = "rfc9162"
+description = "Append-only Merkle logs hashed as RFC 9162: inclusion proofs, consistency proofs and signed tree heads."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "light"
+git-repository-url = "https://github.com/leidarljos/rfc9162"
+edit-url-template = "https://github.com/leidarljos/rfc9162/edit/main/docs/{path}"
+additional-css = ["theme/custom.css"]
+no-section-label = true
+
+[output.html.print]
+enable = false
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-boolean-and = true

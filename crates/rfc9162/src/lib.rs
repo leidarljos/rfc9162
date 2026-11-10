@@ -1,12 +1,25 @@
 //! An append-only Merkle log hashed as RFC 9162 (doi:10.17487/RFC9162):
 //! leaf `SHA-256(0x00 || entry)`, node `SHA-256(0x01 || left || right)`.
-//! Inclusion proofs catch a dropped entry; consistency proofs catch a
-//! rewritten log. Signatures alone bind neither.
+//! An inclusion proof ties one leaf to a root. A consistency proof ties an
+//! older root to a later root that appends. [`Head::material`] is the bytes
+//! a signature covers.
 //!
-//! The crate works over leaf hashes and stores nothing. Each user keeps its
-//! own record format and computes a leaf from its canonical bytes; what those
-//! bytes are is the user's contract. No gossip: a holder showing two
-//! consistent logs to two readers is not caught here.
+//! The functions take leaf hashes. Each caller chooses its record bytes.
+//! Storage and a signed-note envelope live in `rfc9162-tiles` and
+//! `rfc9162-log`. Comparing two logs shown to two readers is a gossip step
+//! outside this crate.
+//!
+//! ```
+//! use rfc9162::{inclusion_proof, leaf_hash, verify_inclusion, Head};
+//!
+//! let leaves: Vec<[u8; 32]> = ["alpha", "beta", "gamma"]
+//!     .iter()
+//!     .map(|record| leaf_hash(record.as_bytes()))
+//!     .collect();
+//! let head = Head::over(&leaves);
+//! let path = inclusion_proof(&leaves, 1).unwrap();
+//! assert!(verify_inclusion(&leaves[1], 1, head.size, &path, &head.root));
+//! ```
 
 use sha2::{Digest, Sha256};
 

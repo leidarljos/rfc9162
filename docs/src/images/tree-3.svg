@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 280" role="img" aria-labelledby="t3 t3d">
+  <title id="t3">Merkle tree of alpha, beta and gamma</title>
+  <desc id="t3d">Root over a node of alpha and beta, beside the leaf gamma. Beta's inclusion proof carries alpha, then gamma.</desc>
+  <style>
+    .edge { stroke: #8aa0ad; stroke-width: 1.6; fill: none; }
+    .node { fill: #f4f8fb; stroke: #6d8794; }
+    .hi { fill: #e5f4fb; stroke: #0b6e99; stroke-width: 2; }
+    text { font-family: "Segoe UI", Helvetica, Arial, sans-serif; fill: #1c2b33; text-anchor: middle; }
+    .main { font-size: 15px; }
+    .sub { font-size: 12px; fill: #3d5560; }
+    .tag { font-size: 12px; fill: #0b6e99; font-weight: 650; }
+  </style>
+  <line class="edge" x1="320" y1="52" x2="190" y2="100"/>
+  <line class="edge" x1="320" y1="52" x2="490" y2="100"/>
+  <line class="edge" x1="190" y1="136" x2="110" y2="190"/>
+  <line class="edge" x1="190" y1="136" x2="270" y2="190"/>
+  <rect class="node" x="250" y="16" width="140" height="36" rx="6"/>
+  <text class="main" x="320" y="39">root</text>
+  <rect class="node" x="120" y="100" width="140" height="36" rx="6"/>
+  <text class="main" x="190" y="123">node(alpha, beta)</text>
+  <rect class="hi" x="420" y="100" width="140" height="36" rx="6"/>
+  <text class="main" x="490" y="123">gamma</text>
+  <text class="tag" x="490" y="92">sibling 2</text>
+  <rect class="hi" x="40" y="190" width="140" height="36" rx="6"/>
+  <text class="main" x="110" y="213">alpha</text>
+  <text class="tag" x="110" y="246">sibling 1</text>
+  <rect class="hi" x="200" y="190" width="140" height="36" rx="6"/>
+  <text class="main" x="270" y="213">beta</text>
+  <text class="sub" x="270" y="246">leaf under proof</text>
+</svg>

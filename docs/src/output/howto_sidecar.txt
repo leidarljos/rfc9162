@@ -1,0 +1,12 @@
+put 0
+snapshot bytes 179
+entry {"sidecar":1,"op":"put","path":"ssh/sshd_config","blob":"e807422bad84e7926a98fb262153b3d9c84244080e69b0e5d20446c183ffafc4","size":8,"meta":{"actor":"root"}}
+history ssh/sshd_config inclusion true run true
+blob Port 22
+
+sync added 2 changed 0 deleted 0 unchanged 0
+resync added 0 changed 1 deleted 1
+tree
+  ssh/sshd_config index 2 bytes 10
+included stacks/2026 at 0
+child origin example.org/stack size 2

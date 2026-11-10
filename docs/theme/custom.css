@@ -1,0 +1,103 @@
+/* Light theme tuned for the guide: a quiet sidebar, blue links, room for diagrams. */
+
+.light,
+html:not(.js) {
+    --content-max-width: 48rem;
+    --sidebar-target-width: 280px;
+    --sidebar-bg: #f4f7f9;
+    --sidebar-fg: #1c2b33;
+    --sidebar-active: #0b6e99;
+    --sidebar-spacer: #e3ebf0;
+    --sidebar-header-border-color: #0b6e99;
+    --links: #0b6e99;
+    --inline-code-color: #1a3a4a;
+    --table-header-bg: #e7eef3;
+    --table-border-color: #d5dee6;
+    --table-alternate-bg: #f7fafc;
+    --quote-bg: #f4f8fb;
+    --quote-border: #d5e4ee;
+    --searchbar-bg: #ffffff;
+    --searchbar-fg: #1c2b33;
+    --searchbar-border-color: #c5d3dc;
+}
+
+.content {
+    font-family: "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+}
+
+.content h1,
+.content h2,
+.content h3 {
+    font-weight: 650;
+    letter-spacing: -0.01em;
+}
+
+.content img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 1rem 0;
+    background: #f7fafc;
+    border: 1px solid #d5e2ea;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+.content table {
+    border-collapse: collapse;
+}
+
+.content table td,
+.content table th {
+    border: 1px solid var(--table-border-color);
+    padding: 0.4rem 0.6rem;
+}
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 1.2rem 0 1.6rem;
+}
+
+.card {
+    display: block;
+    border: 1px solid #d5e2ea;
+    border-radius: 8px;
+    padding: 14px 16px 16px;
+    background: #f7fafc;
+    text-decoration: none;
+    color: #1c2b33;
+}
+
+.card:hover {
+    border-color: #0b6e99;
+    background: #f2f8fb;
+}
+
+.card .kicker {
+    display: block;
+    font-size: 0.75rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #5c7380;
+}
+
+.card strong {
+    display: block;
+    margin: 2px 0 6px;
+    color: #0b6e99;
+    font-size: 1.05rem;
+}
+
+.card p {
+    margin: 0;
+    color: #24343c;
+}
+
+.copyright {
+    margin-top: 2.5rem;
+    color: #5c7380;
+    font-size: 0.9rem;
+}

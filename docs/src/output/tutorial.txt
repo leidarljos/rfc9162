@@ -1,0 +1,24 @@
+append 0 alpha
+append 1 beta
+append 2 gamma
+stored size 3
+stored root 385da30f3917282c8939dff851957e519ab1846b1351a14c0adb3b11632742aa
+files
+  .state/treeState
+  tile/0/000.p/3
+  tile/entries/000.p/3
+get 1 = beta
+tile proof matches flat proof true
+verify inclusion true
+append 3 delta
+verify consistency true
+checkpoint
+example.org/log
+4
+QvxU7rY1L5DMgf3VeRKSzKOXShaCCLOVsGp2JAskiE0=
+
+— example.org/log XizvABGVVgSZCUqVA+tuUquqJ/4ZqAkwPrKofuvUMbxYclF9uL33Ylz1U8bIIrNIZ9VDhwLzfA995O3vyFoe51KWGA4=
+opened at checkpoint size 4
+inclusion at checkpoint true
+sealed 0..=1 manifest 2
+find module=petsc index 0 run true inclusion true
