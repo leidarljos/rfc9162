@@ -17,6 +17,13 @@
 //! written by format v1 (no index) open by reading every record, and become
 //! v2 at their next compaction.
 //!
+//! Writers that share a pack ([`PackStore::open_shared`]) take
+//! `<pack>.lock` for each change rather than for their lifetime: under the
+//! lock a writer reads what the others appended, drops a torn tail a crashed
+//! writer left, applies its change and releases. A shared writer and an
+//! exclusive one ([`PackStore::open`]) still exclude each other through the
+//! same lock file.
+//!
 //! One writer at a time: the writer holds `<pack>.lock`, created
 //! exclusively and removed when the store is dropped, the way the tile
 //! log's own locks work; a crash leaves it, and [`PackStore::break_lock`]
@@ -30,6 +37,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -101,7 +109,22 @@ struct Inner {
 pub struct PackStore {
     path: PathBuf,
     writer: bool,
+    /// Takes the lock per change ([`PackStore::open_shared`]) and waits up to
+    /// this long for it; `None` for an exclusive writer or a reader.
+    shared: Option<Duration>,
     inner: Mutex<Inner>,
+}
+
+/// How long a shared writer waits for `<pack>.lock` before giving up.
+pub const SHARED_LOCK_WAIT: Duration = Duration::from_secs(30);
+
+/// `<pack>.lock` held for one change; removed when dropped.
+struct ChangeLock(PathBuf);
+
+impl Drop for ChangeLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 /// What a compaction did.
@@ -144,6 +167,33 @@ impl PackStore {
                 inner.file.sync_all()?;
             }
         }
+        Ok(store)
+    }
+
+    /// Opens the pack at `path` as one of several writers, creating it when
+    /// absent. No lock is held between changes; each change waits up to
+    /// [`SHARED_LOCK_WAIT`] for `<path>.lock` and fails with
+    /// [`io::ErrorKind::WouldBlock`] after that.
+    pub fn open_shared(path: impl Into<PathBuf>) -> io::Result<Self> {
+        Self::open_shared_waiting(path, SHARED_LOCK_WAIT)
+    }
+
+    /// [`PackStore::open_shared`] with its own wait for the lock.
+    pub fn open_shared_waiting(path: impl Into<PathBuf>, wait: Duration) -> io::Result<Self> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        // Creating the file writes its magic, which happens under the lock so
+        // two writers creating it at once do not both write it.
+        let store = {
+            let _lock = acquire(&lock_path(&path), wait)?;
+            let mut store = Self::open_with(path, true)?;
+            store.shared = Some(wait);
+            store
+        };
         Ok(store)
     }
 
@@ -195,6 +245,7 @@ impl PackStore {
     pub fn compact(&self) -> io::Result<Compacted> {
         self.need_writer()?;
         let mut inner = self.inner.lock().unwrap();
+        let _lock = self.begin(&mut inner)?;
         self.refresh(&mut inner)?;
         let before = inner.valid_len;
         let temp = self.path.with_extension("compacting");
@@ -264,6 +315,7 @@ impl PackStore {
         Ok(Self {
             path,
             writer,
+            shared: None,
             inner: Mutex::new(inner),
         })
     }
@@ -279,10 +331,26 @@ impl PackStore {
         }
     }
 
+    /// For a shared writer, takes the lock, reads what other writers appended
+    /// and drops a torn tail a crashed writer left; the change follows while
+    /// the returned lock is held. Nothing for an exclusive writer.
+    fn begin(&self, inner: &mut Inner) -> io::Result<Option<ChangeLock>> {
+        let Some(wait) = self.shared else {
+            return Ok(None);
+        };
+        let lock = acquire(&lock_path(&self.path), wait)?;
+        self.refresh(inner)?;
+        if inner.file.metadata()?.len() != inner.valid_len {
+            inner.file.set_len(inner.valid_len)?;
+            inner.file.sync_all()?;
+        }
+        Ok(Some(lock))
+    }
+
     /// Reads records a writer appended since, or reopens the pack when a
-    /// compaction replaced the file. A writer's view is its own.
+    /// compaction replaced the file. An exclusive writer's view is its own.
     fn refresh(&self, inner: &mut Inner) -> io::Result<()> {
-        if self.writer {
+        if self.writer && self.shared.is_none() {
             return Ok(());
         }
         let meta = fs::metadata(&self.path)?;
@@ -294,7 +362,7 @@ impl PackStore {
         #[cfg(not(unix))]
         let replaced = meta.len() < inner.valid_len;
         if replaced {
-            *inner = load(&self.path, false)?;
+            *inner = load(&self.path, self.writer)?;
             return Ok(());
         }
         if meta.len() > inner.valid_len {
@@ -391,7 +459,7 @@ fn load(path: &Path, writer: bool) -> io::Result<Inner> {
 
 impl Drop for PackStore {
     fn drop(&mut self) {
-        if self.writer {
+        if self.writer && self.shared.is_none() {
             let _ = fs::remove_file(lock_path(&self.path));
         }
     }
@@ -410,7 +478,9 @@ impl TileStore for PackStore {
 
     fn put(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
         check_path(path)?;
+        self.need_writer()?;
         let mut inner = self.inner.lock().unwrap();
+        let _lock = self.begin(&mut inner)?;
         let slot = self.append(&mut inner, KIND_PUT, path, bytes)?;
         record_live(&mut inner, path, slot);
         Ok(())
@@ -418,7 +488,9 @@ impl TileStore for PackStore {
 
     fn create_new(&self, path: &str, bytes: &[u8]) -> io::Result<bool> {
         check_path(path)?;
+        self.need_writer()?;
         let mut inner = self.inner.lock().unwrap();
+        let _lock = self.begin(&mut inner)?;
         if inner.live.contains_key(path) {
             return Ok(false);
         }
@@ -428,7 +500,9 @@ impl TileStore for PackStore {
     }
 
     fn delete(&self, path: &str) -> io::Result<bool> {
+        self.need_writer()?;
         let mut inner = self.inner.lock().unwrap();
+        let _lock = self.begin(&mut inner)?;
         if !inner.live.contains_key(path) {
             return Ok(false);
         }
@@ -439,7 +513,9 @@ impl TileStore for PackStore {
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         check_path(to)?;
+        self.need_writer()?;
         let mut inner = self.inner.lock().unwrap();
+        let _lock = self.begin(&mut inner)?;
         let Some(slot) = inner.live.get(from).copied() else {
             return Err(io::Error::new(io::ErrorKind::NotFound, from.to_string()));
         };
@@ -494,6 +570,23 @@ fn lock_path(pack: &Path) -> PathBuf {
     let mut name = pack.as_os_str().to_owned();
     name.push(".lock");
     PathBuf::from(name)
+}
+
+/// Takes `lock` for one change, retrying with a growing pause until `wait`
+/// has passed.
+fn acquire(lock: &Path, wait: Duration) -> io::Result<ChangeLock> {
+    let start = Instant::now();
+    let mut pause = Duration::from_millis(1);
+    loop {
+        match take_lock(lock) {
+            Ok(()) => return Ok(ChangeLock(lock.to_path_buf())),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock && start.elapsed() < wait => {
+                std::thread::sleep(pause.min(wait.saturating_sub(start.elapsed())));
+                pause = (pause * 2).min(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn take_lock(lock: &Path) -> io::Result<()> {

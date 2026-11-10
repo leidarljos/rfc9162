@@ -209,3 +209,134 @@ fn a_log_over_a_pack_costs_a_constant_number_of_inodes() {
     assert_eq!(reader.hashes().root().unwrap(), root);
     assert_eq!(reader.bundle(0).unwrap()[5], entry(5));
 }
+
+#[test]
+fn shared_writers_see_each_others_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let pack = dir.path().join("pack");
+    let a = PackStore::open_shared(&pack).unwrap();
+    let b = PackStore::open_shared(&pack).unwrap();
+    a.put("x", b"from a").unwrap();
+    b.put("y", b"from b").unwrap();
+    assert_eq!(b.get("x").unwrap().as_deref(), Some(&b"from a"[..]));
+    assert_eq!(a.get("y").unwrap().as_deref(), Some(&b"from b"[..]));
+    b.rename("x", "z").unwrap();
+    assert_eq!(a.get("x").unwrap(), None);
+    assert_eq!(a.get("z").unwrap().as_deref(), Some(&b"from a"[..]));
+    assert!(a.delete("y").unwrap());
+    assert!(!b.exists("y").unwrap());
+    // No lock is held between changes.
+    assert!(!dir.path().join("pack.lock").exists());
+}
+
+#[test]
+fn concurrent_shared_writers_lose_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let pack = dir.path().join("pack");
+    let threads: Vec<_> = (0..4)
+        .map(|w| {
+            let pack = pack.clone();
+            std::thread::spawn(move || {
+                let store = PackStore::open_shared(&pack).unwrap();
+                for i in 0..200 {
+                    let body = format!("writer {w} entry {i} {}", "x".repeat(150));
+                    store
+                        .put(&format!("w{w}/e{i:03}"), body.as_bytes())
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+    let reader = PackStore::open_read(&pack).unwrap();
+    for w in 0..4 {
+        let paths = reader.list(&format!("w{w}")).unwrap();
+        assert_eq!(paths.len(), 200, "writer {w}");
+        let body = reader.get(&format!("w{w}/e199")).unwrap().unwrap();
+        assert!(body.starts_with(format!("writer {w} entry 199 ").as_bytes()));
+    }
+}
+
+#[test]
+fn only_one_shared_writer_creates_a_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let pack = dir.path().join("pack");
+    let created: usize = (0..4)
+        .map(|_| {
+            let pack = pack.clone();
+            std::thread::spawn(move || {
+                let store = PackStore::open_shared(&pack).unwrap();
+                store.create_new("once", b"first").unwrap() as usize
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|t| t.join().unwrap())
+        .sum();
+    assert_eq!(created, 1);
+}
+
+#[test]
+fn a_shared_writer_waits_for_an_exclusive_one_and_then_gives_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let pack = dir.path().join("pack");
+    let exclusive = PackStore::open(&pack).unwrap();
+    exclusive.put("a", b"a").unwrap();
+    let wait = std::time::Duration::from_millis(100);
+    let err = PackStore::open_shared_waiting(&pack, wait).err().unwrap();
+    assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    drop(exclusive);
+    let shared = PackStore::open_shared_waiting(&pack, wait).unwrap();
+    assert_eq!(shared.get("a").unwrap().as_deref(), Some(&b"a"[..]));
+    shared.put("b", b"b").unwrap();
+}
+
+#[test]
+fn a_shared_writer_drops_a_crashed_writers_torn_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let pack = dir.path().join("pack");
+    let a = PackStore::open_shared(&pack).unwrap();
+    a.put("kept", b"kept").unwrap();
+    // A crashed writer leaves half a record after the last good one.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&pack)
+        .unwrap();
+    file.write_all(&[1, 0, 0, 4, 0, 0, 0, 9]).unwrap();
+    drop(file);
+    let b = PackStore::open_shared(&pack).unwrap();
+    b.put("after", b"after").unwrap();
+    let reader = PackStore::open_read(&pack).unwrap();
+    assert_eq!(reader.get("kept").unwrap().as_deref(), Some(&b"kept"[..]));
+    assert_eq!(reader.get("after").unwrap().as_deref(), Some(&b"after"[..]));
+}
+
+#[test]
+fn a_compaction_by_one_shared_writer_is_followed_by_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let pack = dir.path().join("pack");
+    let a = PackStore::open_shared(&pack).unwrap();
+    let b = PackStore::open_shared(&pack).unwrap();
+    for i in 0..50 {
+        a.put(
+            "same",
+            format!("version {i} {}", "y".repeat(200)).as_bytes(),
+        )
+        .unwrap();
+    }
+    b.put("other", b"other").unwrap();
+    let before = std::fs::metadata(&pack).unwrap().len();
+    let done = a.compact().unwrap();
+    assert!(done.after < before);
+    b.put("late", b"late").unwrap();
+    let reader = PackStore::open_read(&pack).unwrap();
+    assert!(reader
+        .get("same")
+        .unwrap()
+        .unwrap()
+        .starts_with(b"version 49 "));
+    assert_eq!(reader.get("other").unwrap().as_deref(), Some(&b"other"[..]));
+    assert_eq!(reader.get("late").unwrap().as_deref(), Some(&b"late"[..]));
+}

@@ -27,6 +27,6 @@ pub use error::{Error, Result};
 pub use index::{KeyFn, Manifest, Sidecar};
 pub use layout::{Layout, Tile};
 pub use log::{Reader, TreeState, Writer};
-pub use pack::{Compacted, PackStore, PACK_MAGIC, PACK_MAGIC_V1};
+pub use pack::{Compacted, PackStore, PACK_MAGIC, PACK_MAGIC_V1, SHARED_LOCK_WAIT};
 pub use store::{MemoryStore, PosixStore, TileStore};
 pub use tree::{Frontier, Hash, TileHashReader};
