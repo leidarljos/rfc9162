@@ -21,14 +21,14 @@ fn main() {
     let reader = Reader::open(&store, no_keys()).expect("reader");
     let second = reader.get(1).expect("get").expect("present");
     println!("get 1 = {}", String::from_utf8(second).expect("utf-8"));
-    println!("pack bytes {}", store.len().expect("len"));
+    println!("live bytes {}", store.live_bytes().expect("live"));
     // ANCHOR_END: pack
 
     // ANCHOR: compact
     let compacted = store.compact().expect("compact");
     println!(
-        "compact before {} after {} paths {}",
-        compacted.before, compacted.after, compacted.paths
+        "compact after {} paths {}",
+        compacted.after, compacted.paths
     );
     let shared_path = dir.path().join("shared.pack");
     let shared = PackStore::open_shared(&shared_path).expect("shared");

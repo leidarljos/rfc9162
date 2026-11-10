@@ -42,4 +42,4 @@ With fewer than 256 entries there is no sealed bundle, so the directory from the
 
 `PackStore` stores the same paths as records in one append-only file. Each record is a path, its bytes, and a SHA-256 trailer, so a torn tail is ignored. Bodies that shrink under DEFLATE are stored compressed. Entry bundles shrink. Hash tiles stay the same size. `compact` writes a fresh pack with one record per live path and the live table at the front, then renames it over the old file. The tree and the proofs are over entry bytes, so compaction leaves them unchanged.
 
-`PackStore::open` holds `<pack>.lock` for the life of the value. `open_shared` holds it only during each change, and `open_shared_waiting` sets that wait. `open_read` takes no lock. The [tiles how-to](../howto/rfc9162-tiles.md) compacts a two-entry pack from 888 bytes to 532.
+`PackStore::open` holds `<pack>.lock` for the life of the value. `open_shared` holds it only during each change, and `open_shared_waiting` sets that wait. `open_read` takes no lock. The [tiles how-to](../howto/rfc9162-tiles.md) compacts a two-entry pack to 532 bytes and keeps 3 paths.

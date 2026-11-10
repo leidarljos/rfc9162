@@ -50,7 +50,7 @@ Two entries produce a partial level-0 tile and a partial bundle, both of width 2
 {{#include ../output/howto_pack.txt}}
 ```
 
-`compact` on this pack goes from 888 bytes to 532 and keeps 3 paths. Readers open with `PackStore::open_read`, which leaves `<pack>.lock` free.
+`compact` on this pack keeps 3 paths and leaves the file at 532 bytes. The length before compact includes a deleted writer lock whose body is the process id, so that length changes from run to run. Readers open with `PackStore::open_read`, which leaves `<pack>.lock` free.
 
 ## Sign a checkpoint
 
