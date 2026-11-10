@@ -290,12 +290,17 @@ impl Blocks {
             let shared = c.varint()?;
             let unshared = c.varint()?;
             let previous = pairs.last().map(|(k, _)| k.as_slice()).unwrap_or(&[]);
-            if shared > previous.len() as u64 || shared.saturating_add(unshared) > u64::from(u16::MAX) {
+            if shared > previous.len() as u64
+                || shared.saturating_add(unshared) > u64::from(u16::MAX)
+            {
                 return Err(Error::Tampered { what });
             }
             let mut key = previous[..shared as usize].to_vec();
             key.extend_from_slice(c.take(unshared as usize)?);
-            let index = self.lo.checked_add(c.varint()?).ok_or(Error::Tampered { what })?;
+            let index = self
+                .lo
+                .checked_add(c.varint()?)
+                .ok_or(Error::Tampered { what })?;
             if index > self.hi {
                 return Err(Error::Tampered { what });
             }
@@ -326,7 +331,10 @@ impl Run {
     /// A v3 run: the pairs in blocks of [`BLOCK_PAIRS`], each front-coded from
     /// an empty key, behind an index of each block's first key, pair count and
     /// byte length.
-    fn encode_blocks(entries: &RangeInclusive<u64>, pairs: &[(Vec<u8>, u64)]) -> Result<Vec<u8>, Error> {
+    fn encode_blocks(
+        entries: &RangeInclusive<u64>,
+        pairs: &[(Vec<u8>, u64)],
+    ) -> Result<Vec<u8>, Error> {
         let lo = *entries.start();
         let mut bodies: Vec<Vec<u8>> = Vec::new();
         for chunk in pairs.chunks(BLOCK_PAIRS) {
@@ -373,7 +381,11 @@ impl Run {
     /// Reads a v3 run's header, block index and filter; blocks stay encoded.
     fn decode_blocks(body: &[u8], expect: &RunManifest) -> Result<Self, Error> {
         let what = "run file";
-        let mut c = Cursor { bytes: body, at: 0, what };
+        let mut c = Cursor {
+            bytes: body,
+            at: 0,
+            what,
+        };
         let lo = c.u64()?;
         let hi = c.u64()?;
         if lo != *expect.entries.start() || hi != *expect.entries.end() {
@@ -413,7 +425,12 @@ impl Run {
         let mut blob = Vec::new();
         for (first, count, bytes) in heads {
             blob.extend_from_slice(c.take(bytes)?);
-            index.push(BlockRef { first, start, end: start + bytes, count });
+            index.push(BlockRef {
+                first,
+                start,
+                end: start + bytes,
+                count,
+            });
             start += bytes;
         }
         let len = usize::try_from(c.varint()?).map_err(|_| Error::Tampered { what })?;
@@ -421,7 +438,12 @@ impl Run {
         c.done()?;
         Ok(Self {
             pairs: Vec::new(),
-            blocks: Some(Blocks { lo, hi, body: blob, index }),
+            blocks: Some(Blocks {
+                lo,
+                hi,
+                body: blob,
+                index,
+            }),
             filter,
         })
     }
@@ -440,6 +462,8 @@ impl Run {
         }
     }
 
+    /// A v2 run (one front-coded sequence); the writer writes v3.
+    #[cfg(test)]
     fn encode(entries: &RangeInclusive<u64>, pairs: &[(Vec<u8>, u64)]) -> Result<Vec<u8>, Error> {
         let lo = *entries.start();
         let mut out = RUN_MAGIC.to_vec();
@@ -1465,6 +1489,9 @@ mod block_tests {
         assert_eq!(&bytes[at..at + 2], &[0xd0, 0x0f]);
         bytes[at] = 0xcf;
         let expect = manifest(0..=999, &bytes);
-        assert!(matches!(Run::decode(&bytes, &expect), Err(Error::Tampered { .. })));
+        assert!(matches!(
+            Run::decode(&bytes, &expect),
+            Err(Error::Tampered { .. })
+        ));
     }
 }
