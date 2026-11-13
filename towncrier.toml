@@ -4,7 +4,7 @@ directory = "changelog.d"
 filename = "CHANGELOG.md"
 start_string = "<!-- towncrier release notes start -->\n"
 title_format = "## {version} ({project_date})"
-issue_format = "[#{issue}](https://github.com/leidarljos/rfc9162/pull/{issue})"
+issue_format = "[#{issue}](https://github.com/stackhands/rfc9162/pull/{issue})"
 underlines = ["", "", ""]
 # Setting ignore, even to nothing, is what makes `towncrier build` fail a
 # fragment whose name has no configured type. Unset, that file is skipped

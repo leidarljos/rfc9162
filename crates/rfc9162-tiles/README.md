@@ -51,4 +51,4 @@ A write is a temporary file, fsync and rename. The order is bundles, hash tiles,
 
 `Writer::checkpoint` signs the tree state as a C2SP checkpoint. `Signer` reads a PKCS#8 PEM Ed25519 key. The key id is `SHA-256(name || 0x0A || 0x01 || public key)[:4]`. `Reader::open_checkpoint` opens a log at a checkpoint a trusted key signed. `checkpoint::verify_cosignatures` checks witness cosignature/v1 lines.
 
-Released with [rfc9162](https://github.com/leidarljos/rfc9162) at the same version. MIT.
+Released with [rfc9162](https://github.com/stackhands/rfc9162) at the same version. MIT.

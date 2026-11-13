@@ -11,8 +11,8 @@ create-missing = false
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "light"
-git-repository-url = "https://github.com/leidarljos/rfc9162"
-edit-url-template = "https://github.com/leidarljos/rfc9162/edit/main/docs/{path}"
+git-repository-url = "https://github.com/stackhands/rfc9162"
+edit-url-template = "https://github.com/stackhands/rfc9162/edit/main/docs/{path}"
 additional-css = ["theme/custom.css"]
 no-section-label = true
 

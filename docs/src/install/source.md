@@ -1,9 +1,9 @@
 # Install from a checkout
 
-The repository is <https://github.com/leidarljos/rfc9162>.
+The repository is <https://github.com/stackhands/rfc9162>.
 
 ```text
-git clone https://github.com/leidarljos/rfc9162.git
+git clone https://github.com/stackhands/rfc9162.git
 cd rfc9162
 rustup show
 cargo test --locked --workspace
