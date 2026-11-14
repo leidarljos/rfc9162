@@ -1,5 +1,10 @@
 # rfc9162
 
+<p class="stackhands-logo">
+  <img class="logo-light" src="images/logo/logo-light.svg" alt="rfc9162" width="360">
+  <img class="logo-dark" src="images/logo/logo-dark.svg" alt="rfc9162" width="360">
+</p>
+
 Rust crates for an append-only Merkle log hashed as [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162) (Certificate Transparency Version 2.0). A log built with these crates gives each reader an inclusion proof for one entry and a consistency proof between two signed tree heads.
 
 ## Why

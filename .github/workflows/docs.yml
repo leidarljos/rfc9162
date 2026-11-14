@@ -41,3 +41,22 @@ jobs:
           set -euo pipefail
           bash scripts/build-docs.sh
           git diff --exit-code -- docs/src/output
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: docs/book
+
+  deploy:
+    # Publish the book and the API docs to https://stackhands.github.io/rfc9162/
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: docs
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

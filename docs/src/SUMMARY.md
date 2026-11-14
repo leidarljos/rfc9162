@@ -48,3 +48,4 @@
     - [rfc9162-sidecar](reference/sidecar.md)
 - [Changelog](changelog.md)
 - [Contributing](contributing.md)
+- [stackhands tools](stackhands.md)

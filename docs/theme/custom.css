@@ -101,3 +101,13 @@ html:not(.js) {
     color: #5c7380;
     font-size: 0.9rem;
 }
+
+/* The logo pair on the front page: the dark one on the dark themes. */
+.stackhands-logo { text-align: center; }
+.stackhands-logo .logo-dark { display: none; }
+html.coal .stackhands-logo .logo-light,
+html.navy .stackhands-logo .logo-light,
+html.ayu .stackhands-logo .logo-light { display: none; }
+html.coal .stackhands-logo .logo-dark,
+html.navy .stackhands-logo .logo-dark,
+html.ayu .stackhands-logo .logo-dark { display: inline; }

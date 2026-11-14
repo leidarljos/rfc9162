@@ -9,6 +9,7 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
+site-url = "/rfc9162/"
 default-theme = "light"
 preferred-dark-theme = "light"
 git-repository-url = "https://github.com/stackhands/rfc9162"
